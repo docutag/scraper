@@ -1,22 +1,36 @@
 package scraper
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"  // Register GIF format
+	_ "image/jpeg" // Register JPEG format
+	_ "image/png"  // Register PNG format
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	exif "github.com/rwcarlsen/goexif/exif"
+	_ "golang.org/x/image/webp" // Register WebP format
 	"github.com/zombar/scraper/models"
 	"github.com/zombar/scraper/ollama"
 	"golang.org/x/net/html"
+)
+
+const (
+	// UserAgent mimics a recent Chrome browser to avoid being blocked
+	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 // Config contains scraper configuration
@@ -24,6 +38,7 @@ type Config struct {
 	HTTPTimeout         time.Duration
 	OllamaBaseURL       string
 	OllamaModel         string
+	OllamaVisionModel   string        // Separate model for vision tasks (can be same as OllamaModel)
 	EnableImageAnalysis bool          // Enable AI-powered image analysis
 	MaxImageSizeBytes   int64         // Maximum image size to download (bytes)
 	ImageTimeout        time.Duration // Timeout for downloading individual images
@@ -36,10 +51,11 @@ func DefaultConfig() Config {
 		HTTPTimeout:         30 * time.Second,
 		OllamaBaseURL:       ollama.DefaultBaseURL,
 		OllamaModel:         ollama.DefaultModel,
-		EnableImageAnalysis: true,              // Enable image analysis by default
-		MaxImageSizeBytes:   10 * 1024 * 1024,  // 10MB max image size
-		ImageTimeout:        15 * time.Second,  // 15s timeout per image
-		LinkScoreThreshold:  0.5,               // Default threshold for link scoring
+		OllamaVisionModel:   ollama.DefaultModel, // Default to same model as text
+		EnableImageAnalysis: true,                // Enable image analysis by default
+		MaxImageSizeBytes:   10 * 1024 * 1024,    // 10MB max image size
+		ImageTimeout:        15 * time.Second,    // 15s timeout per image
+		LinkScoreThreshold:  0.5,                 // Default threshold for link scoring
 	}
 }
 
@@ -63,12 +79,19 @@ func New(config Config, db DB) *Scraper {
 	// Limit concurrent Ollama requests to 3 to prevent overload during batch operations
 	maxConcurrentOllamaRequests := 3
 
+	// Create HTTP client with HTTP/1.1 only (disable HTTP/2)
+	// Some servers have issues with HTTP/2 from Go clients
+	transport := &http.Transport{
+		TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+	}
+
 	return &Scraper{
 		config: config,
 		httpClient: &http.Client{
-			Timeout: config.HTTPTimeout,
+			Timeout:   config.HTTPTimeout,
+			Transport: transport,
 		},
-		ollamaClient:    ollama.NewClient(config.OllamaBaseURL, config.OllamaModel),
+		ollamaClient:    ollama.NewClientWithVisionModel(config.OllamaBaseURL, config.OllamaModel, config.OllamaVisionModel),
 		ollamaSemaphore: make(chan struct{}, maxConcurrentOllamaRequests),
 		db:              db,
 	}
@@ -103,27 +126,39 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		return nil, fmt.Errorf("URL must be http or https")
 	}
 
-	// Fetch the page
-	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Scraper/1.0)")
+	// Check if this is a direct image URL - create minimal HTML instead of fetching
+	var doc *html.Node
+	if isImageURL(targetURL) {
+		// Create a minimal HTML document with just the image tag
+		// This allows all existing image processing code to work as-is
+		htmlContent := fmt.Sprintf(`<html><body><img src="%s" alt="Direct image"></body></html>`, targetURL)
+		doc, err = html.Parse(strings.NewReader(htmlContent))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HTML for image: %w", err)
+		}
+	} else {
+		// Fetch the page normally
+		req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("User-Agent", UserAgent)
 
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch URL: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch URL: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %d %s", resp.StatusCode, resp.Status)
-	}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("HTTP error: %d %s", resp.StatusCode, resp.Status)
+		}
 
-	// Parse HTML
-	doc, err := html.Parse(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+		// Parse HTML
+		doc, err = html.Parse(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse HTML: %w", err)
+		}
 	}
 
 	// Extract title
@@ -158,6 +193,34 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	images, existingImageRefs, imageWarnings := s.processImages(ctx, images)
 	warnings = append(warnings, imageWarnings...)
 
+	// For direct image URLs, use the image's AI-generated summary and tags
+	isDirectImageURL := isImageURL(targetURL)
+	if isDirectImageURL && len(images) > 0 {
+		img := images[0]
+		// Use image summary as content
+		if img.Summary != "" {
+			content = img.Summary
+		}
+		// Generate a better title from the image summary or filename
+		if img.Summary != "" {
+			// Use first sentence of summary as title, or first 60 chars
+			summaryTitle := img.Summary
+			if len(summaryTitle) > 60 {
+				summaryTitle = summaryTitle[:60] + "..."
+			}
+			// Find first sentence
+			if idx := strings.Index(summaryTitle, "."); idx > 0 && idx < 60 {
+				summaryTitle = summaryTitle[:idx]
+			}
+			title = summaryTitle
+		} else {
+			// Fallback to filename
+			if idx := strings.LastIndex(parsedURL.Path, "/"); idx >= 0 {
+				title = parsedURL.Path[idx+1:]
+			}
+		}
+	}
+
 	// Extract links with Ollama sanitization
 	links := s.extractLinksWithOllama(ctx, doc, parsedURL, title, content)
 
@@ -167,6 +230,14 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	// Add existing image references to metadata
 	if len(existingImageRefs) > 0 {
 		metadata.ExistingImageRefs = existingImageRefs
+	}
+
+	// For direct image URLs, add image tags to metadata keywords
+	if isDirectImageURL && len(images) > 0 {
+		img := images[0]
+		if len(img.Tags) > 0 {
+			metadata.Keywords = img.Tags
+		}
 	}
 
 	// Score the content (with fallback to rule-based scoring)
@@ -203,6 +274,27 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
 		aiUsed = false
 		warnings = append(warnings, "Scoring timed out, using rule-based scoring")
+	}
+
+	// For direct image URLs, add image tags to categories
+	if isDirectImageURL && len(images) > 0 {
+		img := images[0]
+		if len(img.Tags) > 0 {
+			// Combine existing categories with image tags (deduplicated)
+			tagMap := make(map[string]bool)
+			for _, cat := range categories {
+				tagMap[cat] = true
+			}
+			for _, tag := range img.Tags {
+				tagMap[tag] = true
+			}
+			// Convert back to slice
+			combinedCategories := make([]string, 0, len(tagMap))
+			for tag := range tagMap {
+				combinedCategories = append(combinedCategories, tag)
+			}
+			categories = combinedCategories
+		}
 	}
 
 	linkScore := &models.LinkScore{
@@ -251,7 +343,7 @@ func (s *Scraper) ExtractLinks(ctx context.Context, targetURL string) ([]string,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Scraper/1.0)")
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -520,11 +612,15 @@ Format: ["url1", "url2", "url3"]`,
 			// If Ollama fails, fall back to returning filtered links
 			log.Printf("Ollama link sanitization failed, returning filtered links: %v", err)
 		} else {
+			// Strip markdown code blocks if present
+			cleanedResponse := ollama.StripMarkdownCodeBlocks(response)
+
 			// Parse JSON response
 			var parsedLinks []string
-			if err := json.Unmarshal([]byte(response), &parsedLinks); err != nil {
+			if err := json.Unmarshal([]byte(cleanedResponse), &parsedLinks); err != nil {
 				// If parsing fails, fall back to returning filtered links
 				log.Printf("Failed to parse Ollama link response, returning filtered links: %v", err)
+				log.Printf("Response was: %s", response)
 			} else if parsedLinks != nil {
 				sanitizedLinks = parsedLinks
 				log.Printf("AI refined links from %d to %d", len(filteredLinks), len(sanitizedLinks))
@@ -538,6 +634,9 @@ Format: ["url1", "url2", "url3"]`,
 	if sanitizedLinks == nil {
 		sanitizedLinks = []string{}
 	}
+
+	// Deduplicate the final list while preserving order
+	sanitizedLinks = deduplicateLinks(sanitizedLinks)
 
 	return sanitizedLinks
 }
@@ -623,45 +722,155 @@ func extractMetadata(n *html.Node) models.PageMetadata {
 }
 
 // downloadImage downloads an image from a URL with size and timeout limits
-func (s *Scraper) downloadImage(ctx context.Context, imageURL string) ([]byte, error) {
+func (s *Scraper) downloadImage(ctx context.Context, imageURL string) ([]byte, string, error) {
 	// Create request with timeout context
 	ctx, cancel := context.WithTimeout(ctx, s.config.ImageTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", imageURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Scraper/1.0)")
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch image: %w", err)
+		return nil, "", fmt.Errorf("failed to fetch image: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %d %s", resp.StatusCode, resp.Status)
+		return nil, "", fmt.Errorf("HTTP error: %d %s", resp.StatusCode, resp.Status)
 	}
 
 	// Check content length if available
 	if resp.ContentLength > s.config.MaxImageSizeBytes {
-		return nil, fmt.Errorf("image too large: %d bytes (max: %d)", resp.ContentLength, s.config.MaxImageSizeBytes)
+		return nil, "", fmt.Errorf("image too large: %d bytes (max: %d)", resp.ContentLength, s.config.MaxImageSizeBytes)
 	}
+
+	// Get content type from response
+	contentType := resp.Header.Get("Content-Type")
 
 	// Read with size limit
 	limitedReader := io.LimitReader(resp.Body, s.config.MaxImageSizeBytes+1)
 	imageData, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read image data: %w", err)
+		return nil, "", fmt.Errorf("failed to read image data: %w", err)
 	}
 
 	// Check if we exceeded the limit
 	if int64(len(imageData)) > s.config.MaxImageSizeBytes {
-		return nil, fmt.Errorf("image too large: exceeds %d bytes", s.config.MaxImageSizeBytes)
+		return nil, "", fmt.Errorf("image too large: exceeds %d bytes", s.config.MaxImageSizeBytes)
 	}
 
-	return imageData, nil
+	return imageData, contentType, nil
+}
+
+// getImageDimensions extracts width and height from image data
+// Returns (width, height, error)
+func getImageDimensions(imageData []byte) (int, int, error) {
+	// Decode image to get dimensions
+	img, _, err := image.DecodeConfig(bytes.NewReader(imageData))
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to decode image: %w", err)
+	}
+	return img.Width, img.Height, nil
+}
+
+// extractEXIF extracts EXIF metadata from image data
+// Returns nil if no EXIF data is present (not an error)
+func extractEXIF(imageData []byte) *models.EXIFData {
+	x, err := exif.Decode(bytes.NewReader(imageData))
+	if err != nil {
+		// No EXIF data or unable to decode - not an error, many images don't have EXIF
+		return nil
+	}
+
+	exifData := &models.EXIFData{}
+
+	// Extract DateTime
+	if dt, err := x.DateTime(); err == nil {
+		exifData.DateTime = dt.Format(time.RFC3339)
+	}
+
+	// Extract DateTimeOriginal
+	if tag, err := x.Get(exif.DateTimeOriginal); err == nil {
+		if dtStr, err := tag.StringVal(); err == nil {
+			// Parse EXIF datetime format "2006:01:02 15:04:05"
+			if dt, err := time.Parse("2006:01:02 15:04:05", dtStr); err == nil {
+				exifData.DateTimeOriginal = dt.Format(time.RFC3339)
+			}
+		}
+	}
+
+	// Extract Make (camera manufacturer)
+	if tag, err := x.Get(exif.Make); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Make = strings.TrimSpace(val)
+		}
+	}
+
+	// Extract Model (camera model)
+	if tag, err := x.Get(exif.Model); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Model = strings.TrimSpace(val)
+		}
+	}
+
+	// Extract Copyright
+	if tag, err := x.Get(exif.Copyright); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Copyright = strings.TrimSpace(val)
+		}
+	}
+
+	// Extract Artist
+	if tag, err := x.Get(exif.Artist); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Artist = strings.TrimSpace(val)
+		}
+	}
+
+	// Extract Software
+	if tag, err := x.Get(exif.Software); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Software = strings.TrimSpace(val)
+		}
+	}
+
+	// Extract ImageDescription
+	if tag, err := x.Get(exif.ImageDescription); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.ImageDescription = strings.TrimSpace(val)
+		}
+	}
+
+	// Extract Orientation
+	if tag, err := x.Get(exif.Orientation); err == nil {
+		if val, err := tag.Int(0); err == nil {
+			exifData.Orientation = val
+		}
+	}
+
+	// Extract GPS data
+	lat, lon, err := x.LatLong()
+	if err == nil {
+		exifData.GPS = &models.GPSData{
+			Latitude:  lat,
+			Longitude: lon,
+		}
+
+		// Extract altitude if available
+		if tag, err := x.Get(exif.GPSAltitude); err == nil {
+			if alt, err := tag.Rat(0); err == nil {
+				// Altitude is stored as a rational number
+				altitude, _ := alt.Float64()
+				exifData.GPS.Altitude = altitude
+			}
+		}
+	}
+
+	return exifData
 }
 
 // shouldSkipImage determines if an image should be skipped based on URL patterns
@@ -854,7 +1063,7 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 	img.ID = uuid.New().String()
 
 	// Download the image
-	imageData, err := s.downloadImage(ctx, img.URL)
+	imageData, contentType, err := s.downloadImage(ctx, img.URL)
 	if err != nil {
 		log.Printf("Failed to download image %s: %v", img.URL, err)
 		return img, nil, "download_failed"
@@ -864,6 +1073,28 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 
 	// Store base64 encoded image data
 	img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+
+	// Populate file metadata
+	img.FileSizeBytes = int64(len(imageData))
+	img.ContentType = contentType
+
+	// Extract image dimensions
+	width, height, err := getImageDimensions(imageData)
+	if err != nil {
+		log.Printf("Failed to get dimensions for image %s: %v", img.URL, err)
+		// Don't fail the entire operation, just leave dimensions empty
+	} else {
+		img.Width = width
+		img.Height = height
+		log.Printf("Image %s dimensions: %dx%d", img.URL, width, height)
+	}
+
+	// Extract EXIF metadata
+	if exifData := extractEXIF(imageData); exifData != nil {
+		img.EXIF = exifData
+		log.Printf("Extracted EXIF data for image %s (Make: %s, Model: %s, GPS: %v)",
+			img.URL, exifData.Make, exifData.Model, exifData.GPS != nil)
+	}
 
 	// Analyze the image with Ollama (with semaphore protection)
 	if err := s.acquireOllamaSlot(ctx); err == nil {
@@ -918,12 +1149,25 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 		return nil, fmt.Errorf("URL must be http or https")
 	}
 
+	// Skip scoring for direct image URLs
+	if isImageURL(targetURL) {
+		return &models.LinkScore{
+			URL:                 targetURL,
+			Score:               0.0,
+			Reason:              "Image file detected - skipping content scoring",
+			Categories:          []string{"image", "media"},
+			IsRecommended:       false,
+			MaliciousIndicators: []string{},
+			AIUsed:              false,
+		}, nil
+	}
+
 	// Fetch the page
 	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Scraper/1.0)")
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -1005,6 +1249,13 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 func checkForLowQualityPatterns(targetURL, title string) (bool, float64, string, []string, []string) {
 	urlLower := strings.ToLower(targetURL)
 	titleLower := strings.ToLower(title)
+
+	// Check for image content
+	if isImageURL(targetURL) {
+		categories := []string{"image", "media"}
+		maliciousIndicators := []string{}
+		return true, 0.0, "Image file detected - skipping content scoring", categories, maliciousIndicators
+	}
 
 	// Check for audio/video content
 	if isAudioVideoURL(targetURL) {
@@ -1181,6 +1432,13 @@ func filterLowQualityLinks(urls []string) ([]string, int) {
 		}
 
 		if !shouldFilter {
+			// Check if URL is a category/section page
+			if isCategoryPage(url) {
+				shouldFilter = true
+			}
+		}
+
+		if !shouldFilter {
 			filtered = append(filtered, url)
 		} else {
 			filteredCount++
@@ -1188,6 +1446,220 @@ func filterLowQualityLinks(urls []string) ([]string, int) {
 	}
 
 	return filtered, filteredCount
+}
+
+// deduplicateLinks removes duplicate URLs from a list while preserving order
+func deduplicateLinks(urls []string) []string {
+	if len(urls) == 0 {
+		return urls
+	}
+
+	seen := make(map[string]bool, len(urls))
+	deduplicated := make([]string, 0, len(urls))
+
+	for _, url := range urls {
+		if !seen[url] {
+			seen[url] = true
+			deduplicated = append(deduplicated, url)
+		}
+	}
+
+	return deduplicated
+}
+
+// isCategoryPage detects if a URL is likely a category/section landing page
+// These pages are useful for link extraction but shouldn't be in the final results
+func isCategoryPage(targetURL string) bool {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return false
+	}
+
+	path := strings.Trim(parsedURL.Path, "/")
+
+	// Empty path or just the domain (homepage) - not a category
+	if path == "" {
+		return false
+	}
+
+	// Split path into segments
+	segments := strings.Split(path, "/")
+
+	// Common category/section indicators in the path
+	categoryIndicators := []string{
+		"section", "sections", "category", "categories", "topic", "topics",
+		"tag", "tags", "archive", "archives", "index",
+	}
+
+	// Check if any segment contains category indicators (strip file extensions first)
+	for _, segment := range segments {
+		segmentLower := strings.ToLower(segment)
+
+		// Strip common file extensions
+		segmentLower = strings.TrimSuffix(segmentLower, ".html")
+		segmentLower = strings.TrimSuffix(segmentLower, ".htm")
+		segmentLower = strings.TrimSuffix(segmentLower, ".php")
+		segmentLower = strings.TrimSuffix(segmentLower, ".asp")
+		segmentLower = strings.TrimSuffix(segmentLower, ".aspx")
+
+		for _, indicator := range categoryIndicators {
+			if segmentLower == indicator || strings.HasPrefix(segmentLower, indicator+"-") || strings.HasPrefix(segmentLower, indicator+"_") {
+				return true
+			}
+		}
+	}
+
+	// Common news section/category names
+	newsSections := []string{
+		// General news sections
+		"news", "world", "national", "local", "us", "uk", "international", "global",
+		"politics", "political", "government", "policy",
+		"business", "finance", "economy", "markets", "money",
+		"technology", "tech", "science", "innovation",
+		"technology", "tech", "science", "innovation",
+		"health", "medical", "wellness", "healthcare",
+		"sports", "sport", "football", "basketball", "baseball", "soccer",
+		"entertainment", "culture", "arts", "music", "movies", "film", "tv", "television",
+		"lifestyle", "life", "living", "fashion", "food", "travel", "style",
+		"opinion", "opinions", "editorial", "editorials", "commentary", "columnists",
+		"investigations", "analysis", "features", "special-reports",
+		"environment", "climate", "weather", "energy",
+		"education", "schools", "university", "college",
+		"crime", "law", "justice", "courts",
+		"religion", "faith", "beliefs",
+		"obituaries", "obits", "deaths",
+
+		// Regional/location-based sections
+		"asia", "europe", "africa", "americas", "middle-east", "middleeast",
+		"asia-pacific", "latin-america", "north-america", "south-america",
+		"england", "scotland", "wales", "northern-ireland",
+		"us-canada", "latin-america", "middle-east-asia",
+
+		// Media-specific sections
+		"video", "videos", "podcasts", "audio", "multimedia", "gallery", "galleries",
+		"photos", "pictures", "images",
+
+		// Time-based sections
+		"today", "latest", "breaking", "live", "now", "updates",
+	}
+
+	// Check if URL looks like an article (has numeric IDs or article patterns)
+	hasArticlePattern := false
+	for _, segment := range segments {
+		segmentLower := strings.ToLower(segment)
+
+		// Check for "articles" segment (common in modern news sites)
+		if segmentLower == "articles" || segmentLower == "article" || segmentLower == "story" {
+			hasArticlePattern = true
+			break
+		}
+
+		// Check for segments with 8+ digit numbers (common article IDs)
+		// e.g., "world-middle-east-12345678"
+		if len(segmentLower) >= 8 {
+			digitCount := 0
+			for _, char := range segmentLower {
+				if char >= '0' && char <= '9' {
+					digitCount++
+				}
+			}
+			if digitCount >= 8 {
+				hasArticlePattern = true
+				break
+			}
+		}
+	}
+
+	// If it has article patterns, it's not a category page
+	if hasArticlePattern {
+		return false
+	}
+
+	// Check all segments against known section names
+	// If URL has 1-4 path segments and consists primarily of section names, it's likely a category page
+	if len(segments) <= 4 {
+		sectionMatchCount := 0
+		for _, segment := range segments {
+			segmentLower := strings.ToLower(segment)
+
+			// Strip file extensions before checking
+			segmentLower = strings.TrimSuffix(segmentLower, ".html")
+			segmentLower = strings.TrimSuffix(segmentLower, ".htm")
+			segmentLower = strings.TrimSuffix(segmentLower, ".php")
+			segmentLower = strings.TrimSuffix(segmentLower, ".asp")
+			segmentLower = strings.TrimSuffix(segmentLower, ".aspx")
+
+			matched := false
+			for _, section := range newsSections {
+				// Exact match or starts with section name
+				if segmentLower == section || strings.HasPrefix(segmentLower, section+"-") || strings.HasPrefix(segmentLower, section+"_") {
+					matched = true
+					break
+				}
+				// Also check if segment starts with the section name (for compound names like "sciencetech")
+				if len(section) >= 4 && strings.HasPrefix(segmentLower, section) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				sectionMatchCount++
+			}
+		}
+
+		// If most segments are section names, it's a category page
+		// For 1-2 segments: all must match
+		// For 3 segments: at least 2 must match
+		// For 4 segments: at least 3 must match (to avoid false positives with article titles)
+		if len(segments) <= 2 && sectionMatchCount == len(segments) {
+			return true
+		}
+		if len(segments) == 3 && sectionMatchCount >= 2 {
+			return true
+		}
+		if len(segments) == 4 && sectionMatchCount >= 3 {
+			return true
+		}
+	}
+
+	// Check for patterns like "/section/name" or "/category/name" with no further depth
+	if len(segments) == 2 {
+		firstSegment := strings.ToLower(segments[0])
+		for _, indicator := range categoryIndicators {
+			if firstSegment == indicator {
+				return true
+			}
+		}
+	}
+
+	// Check for year-based archive pages (e.g., /2024/, /2024/01/)
+	if len(segments) >= 1 && len(segments) <= 3 {
+		// Check if first segment is a 4-digit year
+		if len(segments[0]) == 4 {
+			_, err := strconv.Atoi(segments[0])
+			if err == nil {
+				// If it's just /YYYY/ or /YYYY/MM/ or /YYYY/MM/DD/, likely an archive
+				if len(segments) <= 2 {
+					return true
+				}
+				// /YYYY/MM/DD/ is still a category if all are numbers
+				if len(segments) == 3 {
+					allNumbers := true
+					for _, seg := range segments {
+						if _, err := strconv.Atoi(seg); err != nil {
+							allNumbers = false
+							break
+						}
+					}
+					if allNumbers {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // isAudioVideoURL checks if a URL points to audio/video content or streaming platforms
@@ -1217,6 +1689,63 @@ func isAudioVideoURL(targetURL string) bool {
 
 	for _, platform := range streamingPlatforms {
 		if strings.Contains(urlLower, platform) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isImageURL checks if a URL points directly to an image file
+func isImageURL(targetURL string) bool {
+	// Parse URL to extract components
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return false
+	}
+
+	// Check for image file extensions in path
+	imageExtensions := []string{
+		".jpg", ".jpeg", ".png", ".gif", ".bmp",
+		".webp", ".svg", ".ico", ".tiff", ".tif",
+	}
+
+	// Check path before query parameters
+	pathLower := strings.ToLower(parsedURL.Path)
+	for _, ext := range imageExtensions {
+		if strings.HasSuffix(pathLower, ext) {
+			return true
+		}
+	}
+
+	// Check for image format in query parameters (e.g., fm=jpg, format=png, ext=jpg)
+	queryParams := parsedURL.Query()
+	formatParams := []string{"fm", "format", "ext", "f"}
+	for _, param := range formatParams {
+		if value := queryParams.Get(param); value != "" {
+			valueLower := strings.ToLower(value)
+			for _, ext := range imageExtensions {
+				// Remove leading dot for comparison with query param values
+				extWithoutDot := strings.TrimPrefix(ext, ".")
+				if valueLower == extWithoutDot || strings.HasPrefix(valueLower, extWithoutDot) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Check for known image hosting domains
+	imageHosts := []string{
+		"images.unsplash.com",
+		"i.imgur.com",
+		"cdn.pixabay.com",
+		"images.pexels.com",
+		"source.unsplash.com",
+	}
+
+	hostLower := strings.ToLower(parsedURL.Host)
+	for _, imageHost := range imageHosts {
+		if hostLower == imageHost || strings.HasSuffix(hostLower, "."+imageHost) {
 			return true
 		}
 	}

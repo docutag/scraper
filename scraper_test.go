@@ -416,8 +416,26 @@ func TestImageProcessing(t *testing.T) {
 		t.Error("Expected image tags to be populated")
 	}
 
+	// Check image metadata
+	if img.Width != 1 {
+		t.Errorf("Image width = %d, want 1", img.Width)
+	}
+
+	if img.Height != 1 {
+		t.Errorf("Image height = %d, want 1", img.Height)
+	}
+
+	if img.FileSizeBytes == 0 {
+		t.Error("Expected FileSizeBytes to be populated")
+	}
+
+	if img.ContentType != "image/png" {
+		t.Errorf("Image ContentType = %s, want 'image/png'", img.ContentType)
+	}
+
 	t.Logf("Image summary: %s", img.Summary)
 	t.Logf("Image tags: %v", img.Tags)
+	t.Logf("Image metadata: %dx%d, %d bytes, %s", img.Width, img.Height, img.FileSizeBytes, img.ContentType)
 }
 
 func TestImageProcessingDisabled(t *testing.T) {
@@ -1274,6 +1292,80 @@ func TestScoreLinkContentAudioVideoWithOllama(t *testing.T) {
 	}
 }
 
+func TestScoreLinkContentImageURLSkipsScoring(t *testing.T) {
+	// Create mock Ollama server (should NOT be called for image URLs)
+	ollamaCallCount := 0
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaCallCount++
+		t.Error("Ollama should not be called for image URLs")
+	}))
+	defer ollamaServer.Close()
+
+	config := Config{
+		HTTPTimeout:        10 * time.Second,
+		OllamaBaseURL:      ollamaServer.URL,
+		OllamaModel:        "test-model",
+		LinkScoreThreshold: 0.5,
+	}
+	s := New(config, nil)
+
+	ctx := context.Background()
+
+	// Test various image extensions and URL patterns
+	imageURLs := []string{
+		"https://example.com/photo.jpg",
+		"https://example.com/image.jpeg",
+		"https://example.com/picture.png",
+		"https://example.com/graphic.gif",
+		"https://example.com/photo.webp",
+		"https://example.com/icon.svg",
+		"https://example.com/image.jpg?size=large",
+		"https://images.unsplash.com/photo-1591738802175-709fedef8288?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixlib=rb-4.1.0&q=80&w=1080",
+		"https://example.com/api/image?format=png&width=500",
+		"https://cdn.example.com/img?ext=webp",
+		"https://i.imgur.com/abc123.jpg",
+		"https://images.pexels.com/photos/123/nature.jpg?auto=compress",
+		"https://source.unsplash.com/random/800x600",
+	}
+
+	for _, imageURL := range imageURLs {
+		t.Run(imageURL, func(t *testing.T) {
+			score, err := s.ScoreLinkContent(ctx, imageURL)
+			if err != nil {
+				t.Fatalf("ScoreLinkContent failed for %s: %v", imageURL, err)
+			}
+
+			if score.Score != 0.0 {
+				t.Errorf("Expected score 0.0 for image URL %s, got %.2f", imageURL, score.Score)
+			}
+
+			if score.AIUsed {
+				t.Error("Expected AIUsed to be false for image URL")
+			}
+
+			if !containsString(score.Categories, "image") {
+				t.Errorf("Expected 'image' category for %s, got: %v", imageURL, score.Categories)
+			}
+
+			if !containsString(score.Categories, "media") {
+				t.Errorf("Expected 'media' category for %s, got: %v", imageURL, score.Categories)
+			}
+
+			if !strings.Contains(score.Reason, "Image file detected") {
+				t.Errorf("Expected reason to mention image detection for %s, got: %s", imageURL, score.Reason)
+			}
+
+			if score.IsRecommended {
+				t.Error("Expected IsRecommended to be false for image URL")
+			}
+		})
+	}
+
+	if ollamaCallCount > 0 {
+		t.Errorf("Ollama was called %d times, expected 0", ollamaCallCount)
+	}
+}
+
 // TestScrapeWithFallbackScoring tests that scraping works with fallback scoring when Ollama is down
 func TestScrapeWithFallbackScoring(t *testing.T) {
 	// Create a mock web server
@@ -1592,5 +1684,314 @@ func TestImageFiltering(t *testing.T) {
 		if keptURLs[url] {
 			t.Errorf("Expected image %q to be filtered out, but it was kept", url)
 		}
+	}
+}
+
+func TestExtractEXIF(t *testing.T) {
+	tests := []struct {
+		name        string
+		imageData   []byte
+		expectEXIF  bool
+		checkFields func(*testing.T, *models.EXIFData)
+	}{
+		{
+			name: "PNG without EXIF",
+			imageData: []byte{
+				0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+				0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+				0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00,
+				0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+				0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d, 0xb4, 0x00, 0x00, 0x00,
+				0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+			},
+			expectEXIF: false,
+		},
+		{
+			name: "Invalid image data",
+			imageData: []byte{0x00, 0x01, 0x02, 0x03},
+			expectEXIF: false,
+		},
+		{
+			name: "Empty data",
+			imageData: []byte{},
+			expectEXIF: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exifData := extractEXIF(tt.imageData)
+
+			if tt.expectEXIF && exifData == nil {
+				t.Error("Expected EXIF data but got nil")
+			}
+
+			if !tt.expectEXIF && exifData != nil {
+				t.Error("Expected no EXIF data but got data")
+			}
+
+			if tt.checkFields != nil && exifData != nil {
+				tt.checkFields(t, exifData)
+			}
+		})
+	}
+}
+
+func TestWebPImageDimensions(t *testing.T) {
+	// Minimal valid WebP image (1x1 pixel)
+	// This is a valid WebP file with RIFF container
+	webpData := []byte{
+		// RIFF header
+		0x52, 0x49, 0x46, 0x46, // "RIFF"
+		0x1a, 0x00, 0x00, 0x00, // File size
+		0x57, 0x45, 0x42, 0x50, // "WEBP"
+		// VP8 chunk
+		0x56, 0x50, 0x38, 0x20, // "VP8 "
+		0x0e, 0x00, 0x00, 0x00, // Chunk size
+		// VP8 bitstream
+		0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a,
+		0x01, 0x00, 0x01, 0x00, 0x00, 0x47, 0x08, 0x85,
+	}
+
+	width, height, err := getImageDimensions(webpData)
+	if err != nil {
+		t.Fatalf("Failed to get dimensions from WebP image: %v", err)
+	}
+
+	// The test WebP image is 1x1
+	if width != 1 {
+		t.Errorf("WebP width = %d, want 1", width)
+	}
+
+	if height != 1 {
+		t.Errorf("WebP height = %d, want 1", height)
+	}
+
+	t.Logf("Successfully extracted WebP dimensions: %dx%d", width, height)
+}
+
+func TestIsCategoryPage(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		isCategory bool
+	}{
+		// Should be detected as category pages
+		{
+			name:       "BBC Arts section",
+			url:        "https://www.bbc.com/arts",
+			isCategory: true,
+		},
+		{
+			name:       "Guardian World Asia",
+			url:        "https://www.theguardian.com/world/asia",
+			isCategory: true,
+		},
+		{
+			name:       "NYTimes Politics",
+			url:        "https://www.nytimes.com/section/politics",
+			isCategory: true,
+		},
+		{
+			name:       "CNN Business",
+			url:        "https://www.cnn.com/business",
+			isCategory: true,
+		},
+		{
+			name:       "Tech category",
+			url:        "https://example.com/technology",
+			isCategory: true,
+		},
+		{
+			name:       "Sports section",
+			url:        "https://example.com/sports",
+			isCategory: true,
+		},
+		{
+			name:       "Category with subcategory",
+			url:        "https://example.com/category/tech",
+			isCategory: true,
+		},
+		{
+			name:       "Year archive",
+			url:        "https://example.com/2024",
+			isCategory: true,
+		},
+		{
+			name:       "Year/Month archive",
+			url:        "https://example.com/2024/01",
+			isCategory: true,
+		},
+		{
+			name:       "Year/Month/Day archive (all numbers)",
+			url:        "https://example.com/2024/01/15",
+			isCategory: true,
+		},
+		{
+			name:       "Tag page",
+			url:        "https://example.com/tag/ai",
+			isCategory: true,
+		},
+		{
+			name:       "Topic page",
+			url:        "https://example.com/topic/climate",
+			isCategory: true,
+		},
+		{
+			name:       "Multiple sections",
+			url:        "https://example.com/world",
+			isCategory: true,
+		},
+		{
+			name:       "Opinion section",
+			url:        "https://example.com/opinion",
+			isCategory: true,
+		},
+		{
+			name:       "Guardian Science section",
+			url:        "https://www.theguardian.com/science",
+			isCategory: true,
+		},
+		{
+			name:       "DailyMail sciencetech index",
+			url:        "https://www.dailymail.co.uk/sciencetech/index.html",
+			isCategory: true,
+		},
+		{
+			name:       "BBC News section",
+			url:        "https://www.bbc.com/news",
+			isCategory: true,
+		},
+		{
+			name:       "BBC World/Asia section",
+			url:        "https://www.bbc.com/news/world/asia",
+			isCategory: true,
+		},
+		{
+			name:       "BBC World/Europe section",
+			url:        "https://www.bbc.com/news/world/europe",
+			isCategory: true,
+		},
+
+		// Should NOT be detected as category pages
+		{
+			name:       "Homepage",
+			url:        "https://www.bbc.com",
+			isCategory: false,
+		},
+		{
+			name:       "Article with world in path",
+			url:        "https://www.theguardian.com/world/asia/2024/jan/15/story-title",
+			isCategory: false,
+		},
+		{
+			name:       "Specific article",
+			url:        "https://www.bbc.com/news/article-title-12345",
+			isCategory: false,
+		},
+		{
+			name:       "BBC article with 8-digit ID",
+			url:        "https://www.bbc.com/news/world-middle-east-12345678",
+			isCategory: false,
+		},
+		{
+			name:       "BBC article in articles path",
+			url:        "https://www.bbc.com/news/articles/c1234567",
+			isCategory: false,
+		},
+		{
+			name:       "Article with date in path",
+			url:        "https://example.com/2024/01/15/article-title",
+			isCategory: false,
+		},
+		{
+			name:       "Deep nested article",
+			url:        "https://example.com/world/asia/china/article-name",
+			isCategory: false,
+		},
+		{
+			name:       "Article with ID",
+			url:        "https://example.com/article/12345",
+			isCategory: false,
+		},
+		{
+			name:       "Blog post",
+			url:        "https://example.com/blog/my-post-title",
+			isCategory: false,
+		},
+		{
+			name:       "Invalid URL",
+			url:        "not a url",
+			isCategory: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isCategoryPage(tt.url)
+			if result != tt.isCategory {
+				t.Errorf("isCategoryPage(%q) = %v, want %v", tt.url, result, tt.isCategory)
+			}
+		})
+	}
+}
+
+func TestDeduplicateLinks(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected []string
+	}{
+		{
+			name:     "no duplicates",
+			input:    []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"},
+			expected: []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"},
+		},
+		{
+			name:     "with duplicates",
+			input:    []string{"https://example.com/1", "https://example.com/2", "https://example.com/1", "https://example.com/3", "https://example.com/2"},
+			expected: []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"},
+		},
+		{
+			name:     "all duplicates",
+			input:    []string{"https://example.com/same", "https://example.com/same", "https://example.com/same"},
+			expected: []string{"https://example.com/same"},
+		},
+		{
+			name:     "empty list",
+			input:    []string{},
+			expected: []string{},
+		},
+		{
+			name:     "single item",
+			input:    []string{"https://example.com/single"},
+			expected: []string{"https://example.com/single"},
+		},
+		{
+			name:     "preserves order",
+			input:    []string{"https://z.com", "https://a.com", "https://m.com", "https://a.com", "https://z.com"},
+			expected: []string{"https://z.com", "https://a.com", "https://m.com"},
+		},
+		{
+			name:     "consecutive duplicates",
+			input:    []string{"https://a.com", "https://a.com", "https://b.com", "https://b.com", "https://c.com"},
+			expected: []string{"https://a.com", "https://b.com", "https://c.com"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := deduplicateLinks(tt.input)
+
+			if len(result) != len(tt.expected) {
+				t.Errorf("deduplicateLinks() length = %d, want %d", len(result), len(tt.expected))
+			}
+
+			for i, url := range result {
+				if i >= len(tt.expected) || url != tt.expected[i] {
+					t.Errorf("deduplicateLinks() at index %d = %q, want %q", i, url, tt.expected[i])
+				}
+			}
+		})
 	}
 }

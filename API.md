@@ -381,6 +381,117 @@ curl http://localhost:8080/api/scrapes/550e8400-e29b-41d4-a716-446655440000/imag
 
 ---
 
+### Delete Image
+
+Permanently delete an image from the database.
+
+**Request:**
+```http
+DELETE /api/images/{id}
+```
+
+**Parameters:**
+- `id` (string, required) - Image UUID
+
+**Response:**
+```json
+{
+  "message": "image deleted successfully"
+}
+```
+
+**Error Response (404):**
+```json
+{
+  "error": "no image found with id: {id}"
+}
+```
+
+**Example:**
+```bash
+curl -X DELETE http://localhost:8080/api/images/550e8400-e29b-41d4-a716-446655440000
+```
+
+**Notes:**
+- This operation is permanent and cannot be undone
+- Image must exist in the database
+
+---
+
+### Tombstone Image
+
+Mark an image as scheduled for deletion by adding `tombstone_datetime` to its record. This is a soft delete that can be undone.
+
+**Request:**
+```http
+PUT /api/images/{id}/tombstone
+```
+
+**Parameters:**
+- `id` (string, required) - Image UUID
+
+**Response:**
+```json
+{
+  "message": "image tombstoned successfully"
+}
+```
+
+**Error Response (404):**
+```json
+{
+  "error": "no image found with id: {id}"
+}
+```
+
+**Example:**
+```bash
+curl -X PUT http://localhost:8080/api/images/550e8400-e29b-41d4-a716-446655440000/tombstone
+```
+
+**Notes:**
+- Adds `tombstone_datetime` field to image record
+- Image remains in database and can be retrieved
+- Can be undone using the untombstone endpoint
+- Image will include `tombstone_datetime` in API responses
+
+---
+
+### Untombstone Image
+
+Remove tombstone status from an image by deleting the `tombstone_datetime` field.
+
+**Request:**
+```http
+DELETE /api/images/{id}/tombstone
+```
+
+**Parameters:**
+- `id` (string, required) - Image UUID
+
+**Response:**
+```json
+{
+  "message": "image untombstoned successfully"
+}
+```
+
+**Error Response (404):**
+```json
+{
+  "error": "no image found with id: {id}"
+}
+```
+
+**Example:**
+```bash
+curl -X DELETE http://localhost:8080/api/images/550e8400-e29b-41d4-a716-446655440000/tombstone
+```
+
+**Use Case:** Restore an image that was marked for deletion. The image returns to normal status.
+
+---
+
 ### List All Data
 
 List all scraped data with pagination.
@@ -526,7 +637,7 @@ curl -X POST http://localhost:8080/api/score \
 
 ### Extract Links
 
-Extract and sanitize links from a URL using AI filtering.
+Extract and sanitize links from a URL using pattern-based and AI filtering. Automatically filters out low-quality links (subscription pages, social media, media files) and category/section pages (e.g., `/arts`, `/world/asia`).
 
 **Request:**
 ```http
@@ -540,6 +651,18 @@ Content-Type: application/json
 
 **Parameters:**
 - `url` (string, required) - URL to extract links from
+
+**Filtering:**
+The endpoint automatically filters out:
+- Low-quality links (subscriptions, login pages, social media, media files)
+- Category/section landing pages:
+  - Single sections: `/arts`, `/business`, `/science`
+  - Multi-level sections: `/news/world/asia`, `/news/world/europe`
+  - Compound names: `/sciencetech/index.html`
+  - Section indicators: `/section/politics`, `/category/tech`
+- Archive pages: `/2024`, `/2024/01`, `/2024/01/15`
+- Tag/topic pages: `/tag/ai`, `/topic/climate`
+- Preserves article URLs with numeric IDs (e.g., `/news/world-middle-east-12345678`)
 
 **Response:**
 ```json
@@ -603,12 +726,13 @@ Information about an extracted image.
 
 ```go
 type ImageInfo struct {
-    ID         string   `json:"id,omitempty"`
-    URL        string   `json:"url"`
-    AltText    string   `json:"alt_text"`
-    Summary    string   `json:"summary"`
-    Tags       []string `json:"tags"`
-    Base64Data string   `json:"base64_data,omitempty"`
+    ID                string     `json:"id,omitempty"`
+    URL               string     `json:"url"`
+    AltText           string     `json:"alt_text"`
+    Summary           string     `json:"summary"`
+    Tags              []string   `json:"tags"`
+    Base64Data        string     `json:"base64_data,omitempty"`
+    TombstoneDatetime *time.Time `json:"tombstone_datetime,omitempty"`
 }
 ```
 
@@ -619,6 +743,7 @@ type ImageInfo struct {
 - `summary` - AI-generated 4-5 sentence description
 - `tags` - AI-generated tags for categorization
 - `base64_data` - Base64-encoded image data (omitted in list responses for performance)
+- `tombstone_datetime` - When the image was marked for deletion (omitted if not tombstoned)
 
 ### PageMetadata
 
@@ -831,6 +956,7 @@ export PORT="8080"
 export DB_PATH="scraper.db"
 export OLLAMA_URL="http://localhost:11434"
 export OLLAMA_MODEL="gpt-oss:20b"
+# export OLLAMA_VISION_MODEL="llama3.2-vision:latest"  # Optional: defaults to OLLAMA_MODEL
 export LINK_SCORE_THRESHOLD="0.5"
 ```
 
@@ -838,7 +964,8 @@ export LINK_SCORE_THRESHOLD="0.5"
 - `PORT` - Server port number
 - `DB_PATH` - Path to SQLite database file
 - `OLLAMA_URL` - Base URL for Ollama API server
-- `OLLAMA_MODEL` - Name of the Ollama model to use for AI features
+- `OLLAMA_MODEL` - Name of the Ollama model to use for text generation and content analysis
+- `OLLAMA_VISION_MODEL` (optional) - Name of the Ollama model to use for image analysis. Must be a vision-capable model like llama3.2-vision, llava, or minicpm-v. Defaults to OLLAMA_MODEL if not specified.
 - `LINK_SCORE_THRESHOLD` - Minimum quality score (0.0-1.0) for recommending a link for ingestion (default: 0.5)
 
 ---
@@ -903,13 +1030,14 @@ CREATE TABLE images (
     summary TEXT,
     tags TEXT,
     base64_data TEXT,
+    tombstone_datetime TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (scrape_id) REFERENCES scraped_data(id) ON DELETE CASCADE
 );
 ```
 
-**Note:** The `tags` field stores a JSON array of strings. Images are automatically deleted when their parent scraped data is deleted (cascade delete).
+**Note:** The `tags` field stores a JSON array of strings. The `tombstone_datetime` field marks images for deletion when set (soft delete). Images are automatically deleted when their parent scraped data is deleted (cascade delete).
 
 ### Indexes
 
