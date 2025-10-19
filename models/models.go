@@ -31,10 +31,17 @@ type ImageInfo struct {
 
 // PageMetadata contains additional metadata about the scraped page
 type PageMetadata struct {
-	Description   string   `json:"description,omitempty"`
-	Keywords      []string `json:"keywords,omitempty"`
-	Author        string   `json:"author,omitempty"`
-	PublishedDate string   `json:"published_date,omitempty"`
+	Description          string                 `json:"description,omitempty"`
+	Keywords             []string               `json:"keywords,omitempty"`
+	Author               string                 `json:"author,omitempty"`
+	PublishedDate        string                 `json:"published_date,omitempty"`
+	ExistingImageRefs    []ExistingImageRef     `json:"existing_image_refs,omitempty"` // References to images already in database
+}
+
+// ExistingImageRef represents a reference to an existing image that was not re-downloaded
+type ExistingImageRef struct {
+	ImageID  string `json:"image_id"`  // ID of the existing image
+	ImageURL string `json:"image_url"` // URL of the image (for reference)
 }
 
 // OllamaRequest represents a request to the Ollama API

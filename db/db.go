@@ -345,6 +345,46 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 	return image, nil
 }
 
+// GetImageByURL retrieves an image by its source URL
+func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
+	var (
+		imageID     string
+		imageURL    string
+		altText     string
+		summary     string
+		tagsJSON    string
+		base64Data  string
+	)
+
+	query := "SELECT id, url, alt_text, summary, tags, base64_data FROM images WHERE url = ? LIMIT 1"
+	err := db.conn.QueryRow(query, url).Scan(&imageID, &imageURL, &altText, &summary, &tagsJSON, &base64Data)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query image by URL: %w", err)
+	}
+
+	var tags []string
+	if tagsJSON != "" && tagsJSON != "null" {
+		if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal tags: %w", err)
+		}
+	}
+
+	image := &models.ImageInfo{
+		ID:         imageID,
+		URL:        imageURL,
+		AltText:    altText,
+		Summary:    summary,
+		Tags:       tags,
+		Base64Data: base64Data,
+	}
+
+	return image, nil
+}
+
 // SearchImagesByTags searches for images by tags using fuzzy matching
 // Returns images that contain any of the search tags (case-insensitive)
 func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, error) {

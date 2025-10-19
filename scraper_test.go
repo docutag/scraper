@@ -14,7 +14,7 @@ import (
 
 func TestNew(t *testing.T) {
 	config := DefaultConfig()
-	s := New(config)
+	s := New(config, nil)
 
 	if s == nil {
 		t.Fatal("Expected scraper to be non-nil")
@@ -81,7 +81,7 @@ func TestExtractLinks(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	links, err := s.ExtractLinks(ctx, webServer.URL)
@@ -108,7 +108,7 @@ func TestExtractLinks(t *testing.T) {
 
 func TestExtractLinksInvalidURL(t *testing.T) {
 	config := DefaultConfig()
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 
@@ -149,7 +149,7 @@ func TestExtractLinksHTTPError(t *testing.T) {
 	defer webServer.Close()
 
 	config := DefaultConfig()
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	_, err := s.ExtractLinks(ctx, webServer.URL)
@@ -184,7 +184,7 @@ func TestExtractLinksMalformedHTML(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	// Should not panic, should handle gracefully
@@ -209,7 +209,7 @@ func TestExtractLinksContextCancellation(t *testing.T) {
 	defer webServer.Close()
 
 	config := DefaultConfig()
-	s := New(config)
+	s := New(config, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -250,7 +250,7 @@ func TestExtractLinksSanitizationFallback(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	links, err := s.ExtractLinks(ctx, webServer.URL)
@@ -301,7 +301,7 @@ func TestExtractLinksEmptyPage(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	links, err := s.ExtractLinks(ctx, webServer.URL)
@@ -385,7 +385,7 @@ func TestImageProcessing(t *testing.T) {
 		MaxImageSizeBytes:   10 * 1024 * 1024,
 		ImageTimeout:        5 * time.Second,
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -445,7 +445,7 @@ func TestImageProcessingDisabled(t *testing.T) {
 		MaxImageSizeBytes:   10 * 1024 * 1024,
 		ImageTimeout:        5 * time.Second,
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -507,7 +507,7 @@ func TestScoreLinkContent(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -563,7 +563,7 @@ func TestScoreLinkContentLowScore(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -611,7 +611,7 @@ func TestScoreLinkContentMalicious(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -635,7 +635,7 @@ func TestScoreLinkContentMalicious(t *testing.T) {
 
 func TestScoreLinkContentInvalidURL(t *testing.T) {
 	config := DefaultConfig()
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 
@@ -688,7 +688,7 @@ func TestScoreLinkContentOllamaFailure(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -752,7 +752,7 @@ func TestScoreLinkContentCustomThreshold(t *testing.T) {
 				OllamaModel:        "test-model",
 				LinkScoreThreshold: tt.threshold,
 			}
-			s := New(config)
+			s := New(config, nil)
 
 			ctx := context.Background()
 			score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -827,7 +827,7 @@ func TestScrapeIncludesScore(t *testing.T) {
 		LinkScoreThreshold:  0.5,
 		EnableImageAnalysis: false, // Disable to simplify test
 	}
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -1024,6 +1024,162 @@ func TestScoreContentFallbackGambling(t *testing.T) {
 	}
 }
 
+func TestScoreContentFallbackAudioVideo(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		title    string
+		content  string
+		wantCategory string
+	}{
+		{
+			name:         "MP3 audio file",
+			url:          "https://example.com/music/song.mp3",
+			title:        "My Song",
+			content:      "Audio file",
+			wantCategory: "audio-video",
+		},
+		{
+			name:         "MP4 video file",
+			url:          "https://example.com/videos/movie.mp4",
+			title:        "Movie",
+			content:      "Video file",
+			wantCategory: "audio-video",
+		},
+		{
+			name:         "YouTube link",
+			url:          "https://www.youtube.com/watch?v=abc123",
+			title:        "YouTube Video",
+			content:      "Watch this video",
+			wantCategory: "streaming",
+		},
+		{
+			name:         "Spotify link",
+			url:          "https://open.spotify.com/track/xyz789",
+			title:        "Spotify Track",
+			content:      "Listen to this track",
+			wantCategory: "streaming",
+		},
+		{
+			name:         "Audio file with query params",
+			url:          "https://cdn.example.com/audio.mp3?token=abc",
+			title:        "Audio",
+			content:      "Audio content",
+			wantCategory: "audio-video",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score, reason, categories, indicators := scoreContentFallback(
+				tt.url,
+				tt.title,
+				tt.content,
+			)
+
+			if score != 0.15 {
+				t.Errorf("Expected score 0.15 for %s, got %.2f", tt.name, score)
+			}
+
+			if !containsString(categories, tt.wantCategory) {
+				t.Errorf("Expected '%s' category for %s, got: %v", tt.wantCategory, tt.name, categories)
+			}
+
+			if !containsString(categories, "media") {
+				t.Errorf("Expected 'media' category for %s, got: %v", tt.name, categories)
+			}
+
+			if !containsString(categories, "low-quality") {
+				t.Errorf("Expected 'low-quality' category for %s, got: %v", tt.name, categories)
+			}
+
+			if len(indicators) == 0 {
+				t.Errorf("Expected malicious indicators for %s", tt.name)
+			}
+
+			if reason == "" {
+				t.Errorf("Expected reason for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestIsAudioVideoURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		expected bool
+	}{
+		{"MP3 file", "https://example.com/audio.mp3", true},
+		{"MP4 file", "https://example.com/video.mp4", true},
+		{"YouTube", "https://www.youtube.com/watch?v=abc123", true},
+		{"Spotify", "https://open.spotify.com/track/xyz", true},
+		{"Audio with query", "https://cdn.example.com/song.mp3?token=abc", true},
+		{"Regular webpage", "https://example.com/article", false},
+		{"GitHub", "https://github.com/user/repo", false},
+		{"Wikipedia", "https://en.wikipedia.org/wiki/Article", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isAudioVideoURL(tt.url)
+			if result != tt.expected {
+				t.Errorf("isAudioVideoURL(%s) = %v, want %v", tt.url, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestScoreLinkContentAudioVideoWithOllama(t *testing.T) {
+	// Create mock Ollama server (should NOT be called for audio/video URLs)
+	ollamaCallCount := 0
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaCallCount++
+		t.Error("Ollama should not be called for audio/video URLs")
+	}))
+	defer ollamaServer.Close()
+
+	// Create mock web server for YouTube-like page
+	webServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head><title>Video Title</title></head><body>Video content</body></html>`))
+	}))
+	defer webServer.Close()
+
+	config := Config{
+		HTTPTimeout:        10 * time.Second,
+		OllamaBaseURL:      ollamaServer.URL,
+		OllamaModel:        "test-model",
+		LinkScoreThreshold: 0.5,
+	}
+	s := New(config, nil)
+
+	ctx := context.Background()
+
+	// Test with YouTube URL (should be detected before calling Ollama)
+	youtubeURL := "https://www.youtube.com/watch?v=test123"
+	score, err := s.ScoreLinkContent(ctx, youtubeURL)
+	if err != nil {
+		t.Fatalf("ScoreLinkContent failed: %v", err)
+	}
+
+	if score.Score != 0.15 {
+		t.Errorf("Expected score 0.15 for YouTube URL, got %.2f", score.Score)
+	}
+
+	if score.AIUsed {
+		t.Error("Expected AIUsed to be false for audio/video URL")
+	}
+
+	if ollamaCallCount > 0 {
+		t.Errorf("Ollama was called %d times, expected 0", ollamaCallCount)
+	}
+
+	if !containsString(score.Categories, "streaming") {
+		t.Errorf("Expected 'streaming' category, got: %v", score.Categories)
+	}
+}
+
 // TestScrapeWithFallbackScoring tests that scraping works with fallback scoring when Ollama is down
 func TestScrapeWithFallbackScoring(t *testing.T) {
 	// Create a mock web server
@@ -1040,7 +1196,7 @@ func TestScrapeWithFallbackScoring(t *testing.T) {
 	// Create scraper WITHOUT Ollama client (will fail and use fallback)
 	config := DefaultConfig()
 	config.LinkScoreThreshold = 0.5
-	s := New(config)
+	s := New(config, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -1272,7 +1428,7 @@ func TestImageFiltering(t *testing.T) {
 	config := DefaultConfig()
 	config.OllamaBaseURL = ollamaServer.URL
 	config.EnableImageAnalysis = true
-	s := New(config)
+	s := New(config, nil)
 
 	// Create test images - mix of valid and junk images
 	images := []models.ImageInfo{
@@ -1286,7 +1442,12 @@ func TestImageFiltering(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	processedImages, warnings := s.processImages(ctx, images)
+	processedImages, existingRefs, warnings := s.processImages(ctx, images)
+
+	// Check that no existing refs were found (all new images)
+	if len(existingRefs) != 0 {
+		t.Errorf("Expected 0 existing image refs, got %d", len(existingRefs))
+	}
 
 	// Should filter out: placeholder, temp, icon, logo (4 images)
 	// Should keep: article-photo, product, hero-image (3 images)
