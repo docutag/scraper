@@ -320,6 +320,67 @@ curl -X POST http://localhost:8080/api/images/search \
 
 ---
 
+### Get Images by Scrape ID
+
+Retrieve all images associated with a specific scrape operation.
+
+**Request:**
+```http
+GET /api/scrapes/{id}/images
+```
+
+**Parameters:**
+- `id` (string, required) - Scrape ID (UUID from scraped data)
+
+**Response:**
+```json
+{
+  "images": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "url": "https://example.com/image1.jpg",
+      "alt_text": "First image",
+      "summary": "Image shows a diagram explaining...",
+      "tags": ["diagram", "technical"],
+      "base64_data": "iVBORw0KGgoAAAANSUhEUgAAAAEA..."
+    },
+    {
+      "id": "660e8400-e29b-41d4-a716-446655440001",
+      "url": "https://example.com/image2.png",
+      "alt_text": "Second image",
+      "summary": "Graph depicting performance metrics...",
+      "tags": ["chart", "data"],
+      "base64_data": "iVBORw0KGgoAAAANSUhEUgAAAAEA..."
+    }
+  ],
+  "count": 2
+}
+```
+
+**Empty Response:**
+```json
+{
+  "images": [],
+  "count": 0
+}
+```
+
+**Error Response (400):**
+```json
+{
+  "error": "scrape id is required"
+}
+```
+
+**Example:**
+```bash
+curl http://localhost:8080/api/scrapes/550e8400-e29b-41d4-a716-446655440000/images
+```
+
+**Use Case:** Retrieve all images from a specific scraping operation. The scrape ID is the `id` field returned when scraping a URL.
+
+---
+
 ### List All Data
 
 List all scraped data with pagination.

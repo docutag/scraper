@@ -86,6 +86,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/data", s.handleList)
 	s.mux.HandleFunc("/api/images/search", s.handleImageSearch)
 	s.mux.HandleFunc("/api/images/", s.handleImage) // Handles /api/images/{id}
+	s.mux.HandleFunc("/api/scrapes/", s.handleScrapeImages) // Handles /api/scrapes/{id}/images
 }
 
 // Start starts the API server
@@ -464,6 +465,36 @@ func (s *Server) handleImageSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	images, err := s.db.SearchImagesByTags(req.Tags)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+
+	response := ImageSearchResponse{
+		Images: images,
+		Count:  len(images),
+	}
+
+	respondJSON(w, http.StatusOK, response)
+}
+
+// handleScrapeImages handles GET requests to retrieve images for a specific scrape ID
+func (s *Server) handleScrapeImages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Extract scrape ID from path - format: /api/scrapes/{id}/images
+	path := strings.TrimPrefix(r.URL.Path, "/api/scrapes/")
+	path = strings.TrimSuffix(path, "/images")
+
+	if path == "" || path == r.URL.Path {
+		respondError(w, http.StatusBadRequest, "scrape id is required")
+		return
+	}
+
+	images, err := s.db.GetImagesByScrapeID(path)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "database error")
 		return

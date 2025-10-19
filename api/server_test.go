@@ -356,3 +356,112 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+func TestHandleScrapeImages(t *testing.T) {
+	server, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	// Create test scrape data with images
+	ctx := context.Background()
+	testURL := "https://example.com/test"
+	result, err := server.scraper.Scrape(ctx, testURL)
+	if err != nil {
+		t.Skipf("Skipping test - failed to create test data: %v", err)
+	}
+
+	// Save the scrape data
+	if err := server.db.SaveScrapedData(result); err != nil {
+		t.Fatalf("Failed to save test scrape data: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		method         string
+		scrapeID       string
+		wantStatusCode int
+		wantErrMsg     string
+		checkResponse  func(t *testing.T, resp *ImageSearchResponse)
+	}{
+		{
+			name:           "valid scrape ID",
+			method:         http.MethodGet,
+			scrapeID:       result.ID,
+			wantStatusCode: http.StatusOK,
+			checkResponse: func(t *testing.T, resp *ImageSearchResponse) {
+				if resp.Images == nil {
+					t.Error("Expected Images to be non-nil")
+				}
+				if resp.Count != len(resp.Images) {
+					t.Errorf("Count %d doesn't match images length %d", resp.Count, len(resp.Images))
+				}
+			},
+		},
+		{
+			name:           "missing scrape ID",
+			method:         http.MethodGet,
+			scrapeID:       "",
+			wantStatusCode: http.StatusBadRequest,
+			wantErrMsg:     "scrape id is required",
+		},
+		{
+			name:           "non-existent scrape ID",
+			method:         http.MethodGet,
+			scrapeID:       "non-existent-id",
+			wantStatusCode: http.StatusOK,
+			checkResponse: func(t *testing.T, resp *ImageSearchResponse) {
+				if resp.Images == nil {
+					t.Error("Expected Images to be non-nil (empty slice)")
+				}
+				if resp.Count != 0 {
+					t.Errorf("Count should be 0 for non-existent scrape, got %d", resp.Count)
+				}
+			},
+		},
+		{
+			name:           "POST method not allowed",
+			method:         http.MethodPost,
+			scrapeID:       result.ID,
+			wantStatusCode: http.StatusMethodNotAllowed,
+			wantErrMsg:     "method not allowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var path string
+			if tt.scrapeID == "" {
+				path = "/api/scrapes//images"
+			} else {
+				path = "/api/scrapes/" + tt.scrapeID + "/images"
+			}
+
+			req := httptest.NewRequest(tt.method, path, nil)
+			w := httptest.NewRecorder()
+
+			server.handleScrapeImages(w, req)
+
+			if w.Code != tt.wantStatusCode {
+				t.Errorf("Status code = %d, want %d", w.Code, tt.wantStatusCode)
+			}
+
+			if tt.wantErrMsg != "" {
+				var errResp map[string]string
+				if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+					t.Fatalf("Failed to decode error response: %v", err)
+				}
+				if errResp["error"] != tt.wantErrMsg {
+					t.Errorf("Error message = %q, want %q", errResp["error"], tt.wantErrMsg)
+				}
+				return
+			}
+
+			if tt.checkResponse != nil {
+				var resp ImageSearchResponse
+				if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+					t.Fatalf("Failed to decode response: %v", err)
+				}
+				tt.checkResponse(t, &resp)
+			}
+		})
+	}
+}
+
