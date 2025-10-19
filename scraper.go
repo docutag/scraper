@@ -43,16 +43,23 @@ func DefaultConfig() Config {
 	}
 }
 
+// DB interface defines the database operations needed by the scraper
+type DB interface {
+	GetImageByURL(url string) (*models.ImageInfo, error)
+}
+
 // Scraper handles web scraping operations
 type Scraper struct {
 	config         Config
 	httpClient     *http.Client
 	ollamaClient   *ollama.Client
 	ollamaSemaphore chan struct{} // Semaphore to limit concurrent Ollama requests
+	db             DB            // Database for checking existing images
 }
 
 // New creates a new Scraper instance
-func New(config Config) *Scraper {
+// db parameter can be nil if image deduplication is not needed
+func New(config Config, db DB) *Scraper {
 	// Limit concurrent Ollama requests to 3 to prevent overload during batch operations
 	maxConcurrentOllamaRequests := 3
 
@@ -63,6 +70,7 @@ func New(config Config) *Scraper {
 		},
 		ollamaClient:    ollama.NewClient(config.OllamaBaseURL, config.OllamaModel),
 		ollamaSemaphore: make(chan struct{}, maxConcurrentOllamaRequests),
+		db:              db,
 	}
 }
 
@@ -147,7 +155,7 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	images := extractImages(doc, parsedURL)
 
 	// Process images (download and analyze if enabled)
-	images, imageWarnings := s.processImages(ctx, images)
+	images, existingImageRefs, imageWarnings := s.processImages(ctx, images)
 	warnings = append(warnings, imageWarnings...)
 
 	// Extract links with Ollama sanitization
@@ -156,6 +164,11 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	// Extract metadata
 	metadata := extractMetadata(doc)
 
+	// Add existing image references to metadata
+	if len(existingImageRefs) > 0 {
+		metadata.ExistingImageRefs = existingImageRefs
+	}
+
 	// Score the content (with fallback to rule-based scoring)
 	var score float64
 	var reason string
@@ -163,7 +176,11 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	var maliciousIndicators []string
 	var aiUsed bool
 
-	if err := s.acquireOllamaSlot(ctx); err == nil {
+	// Check for audio/video content first (always score low regardless of Ollama)
+	if isAudioVideoURL(targetURL) {
+		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
+		aiUsed = false
+	} else if err := s.acquireOllamaSlot(ctx); err == nil {
 		var err error
 		score, reason, categories, maliciousIndicators, err = s.ollamaClient.ScoreContent(ctx, targetURL, title, content)
 		s.releaseOllamaSlot()
@@ -278,14 +295,39 @@ func (s *Scraper) ExtractLinks(ctx context.Context, targetURL string) ([]string,
 }
 
 // extractTitle extracts the page title from the HTML
+// Priority: og:title > twitter:title > h1 > title tag
 func extractTitle(n *html.Node) string {
-	var title string
+	var ogTitle, twitterTitle, h1Title, htmlTitle string
+
 	var f func(*html.Node)
 	f = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "title" {
-			if n.FirstChild != nil {
-				title = n.FirstChild.Data
-				return
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "meta":
+				var property, name, content string
+				for _, attr := range n.Attr {
+					switch attr.Key {
+					case "property":
+						property = strings.ToLower(attr.Val)
+					case "name":
+						name = strings.ToLower(attr.Val)
+					case "content":
+						content = attr.Val
+					}
+				}
+				if property == "og:title" && ogTitle == "" {
+					ogTitle = content
+				} else if name == "twitter:title" && twitterTitle == "" {
+					twitterTitle = content
+				}
+			case "h1":
+				if h1Title == "" && n.FirstChild != nil {
+					h1Title = extractTextFromNode(n)
+				}
+			case "title":
+				if htmlTitle == "" && n.FirstChild != nil {
+					htmlTitle = n.FirstChild.Data
+				}
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -293,7 +335,37 @@ func extractTitle(n *html.Node) string {
 		}
 	}
 	f(n)
-	return strings.TrimSpace(title)
+
+	// Return first available title in priority order
+	if ogTitle != "" {
+		return strings.TrimSpace(ogTitle)
+	}
+	if twitterTitle != "" {
+		return strings.TrimSpace(twitterTitle)
+	}
+	if h1Title != "" {
+		return strings.TrimSpace(h1Title)
+	}
+	return strings.TrimSpace(htmlTitle)
+}
+
+// extractTextFromNode extracts all text content from a single node and its children
+func extractTextFromNode(n *html.Node) string {
+	var parts []string
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			trimmed := strings.TrimSpace(n.Data)
+			if trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
+	}
+	f(n)
+	return strings.Join(parts, " ")
 }
 
 // extractText extracts all text content from the HTML
@@ -619,17 +691,18 @@ func shouldSkipImage(imageURL string) bool {
 
 // processImages downloads and analyzes images if image analysis is enabled
 // Uses parallel processing with worker pool for better performance
-// Returns processed images and any warnings encountered
-func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) ([]models.ImageInfo, []string) {
+// Returns processed images, existing image references, and any warnings encountered
+func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) ([]models.ImageInfo, []models.ExistingImageRef, []string) {
 	warnings := []string{}
+	existingRefs := []models.ExistingImageRef{}
 
 	if !s.config.EnableImageAnalysis {
 		log.Printf("Image analysis disabled, returning %d images without analysis", len(images))
-		return images, warnings
+		return images, existingRefs, warnings
 	}
 
 	if len(images) == 0 {
-		return images, warnings
+		return images, existingRefs, warnings
 	}
 
 	// Filter out placeholder, temp, UI component, and junk images
@@ -652,7 +725,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 	// If all images were filtered out, return early
 	if len(filteredImages) == 0 {
 		log.Printf("All %d images were filtered out as junk", len(images))
-		return []models.ImageInfo{}, warnings
+		return []models.ImageInfo{}, existingRefs, warnings
 	}
 
 	// Use filtered images for processing
@@ -668,9 +741,10 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 	}
 
 	type imageResult struct {
-		index   int
-		img     models.ImageInfo
-		warning string
+		index       int
+		img         models.ImageInfo
+		warning     string
+		existingRef *models.ExistingImageRef // Non-nil if image already exists in DB
 	}
 
 	jobs := make(chan imageJob, len(images))
@@ -683,8 +757,8 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				img, warning := s.processSingleImage(ctx, job.img)
-				results <- imageResult{index: job.index, img: img, warning: warning}
+				img, existingRef, warning := s.processSingleImage(ctx, job.img)
+				results <- imageResult{index: job.index, img: img, warning: warning, existingRef: existingRef}
 			}
 		}()
 	}
@@ -702,10 +776,17 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 	}()
 
 	// Collect results in order
-	processedImages := make([]models.ImageInfo, len(images))
+	processedImages := make([]models.ImageInfo, 0, len(images))
 	failedAnalysis := 0
 	for result := range results {
-		processedImages[result.index] = result.img
+		if result.existingRef != nil {
+			// Image already exists in database, add reference
+			existingRefs = append(existingRefs, *result.existingRef)
+			log.Printf("Skipped downloading existing image %s (ID: %s)", result.existingRef.ImageURL, result.existingRef.ImageID)
+		} else {
+			// New image, add to processed list
+			processedImages = append(processedImages, result.img)
+		}
 		if result.warning != "" {
 			failedAnalysis++
 		}
@@ -716,20 +797,42 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 		warnings = append(warnings, fmt.Sprintf("AI analysis failed for %d/%d images", failedAnalysis, len(images)))
 	}
 
-	return processedImages, warnings
+	// Add info about deduplicated images
+	if len(existingRefs) > 0 {
+		log.Printf("Found %d existing images (not re-downloaded)", len(existingRefs))
+	}
+
+	return processedImages, existingRefs, warnings
 }
 
 // processSingleImage processes a single image (download and analyze)
-// Returns the processed image and a warning string (empty if no issues)
-func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) (models.ImageInfo, string) {
-	// Generate UUID for the image
+// Returns the processed image, existing image reference (if found), and a warning string (empty if no issues)
+// If existingRef is non-nil, the image already exists and img should be ignored
+func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) (models.ImageInfo, *models.ExistingImageRef, string) {
+	// Check if image already exists in database (if DB is available)
+	if s.db != nil {
+		existingImage, err := s.db.GetImageByURL(img.URL)
+		if err != nil {
+			log.Printf("Error checking for existing image %s: %v", img.URL, err)
+			// Continue with download despite error
+		} else if existingImage != nil {
+			// Image already exists, return reference
+			ref := &models.ExistingImageRef{
+				ImageID:  existingImage.ID,
+				ImageURL: existingImage.URL,
+			}
+			return models.ImageInfo{}, ref, ""
+		}
+	}
+
+	// Generate UUID for the new image
 	img.ID = uuid.New().String()
 
 	// Download the image
 	imageData, err := s.downloadImage(ctx, img.URL)
 	if err != nil {
 		log.Printf("Failed to download image %s: %v", img.URL, err)
-		return img, "download_failed"
+		return img, nil, "download_failed"
 	}
 
 	log.Printf("Downloaded image %s (%d bytes)", img.URL, len(imageData))
@@ -743,7 +846,7 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 		s.releaseOllamaSlot()
 		if err != nil {
 			log.Printf("Failed to analyze image %s: %v", img.URL, err)
-			return img, "analysis_failed"
+			return img, nil, "analysis_failed"
 		}
 
 		// Update image info with analysis results
@@ -751,11 +854,11 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 		img.Tags = tags
 		log.Printf("Successfully analyzed image %s (summary: %d chars, tags: %d)",
 			img.URL, len(summary), len(tags))
-		return img, ""
+		return img, nil, ""
 	}
 
 	log.Printf("Context cancelled while waiting for Ollama slot for image %s: %v", img.URL, err)
-	return img, "analysis_timeout"
+	return img, nil, "analysis_timeout"
 }
 
 // min returns the minimum of two integers
@@ -829,7 +932,11 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 	var maliciousIndicators []string
 	var aiUsed bool
 
-	if err := s.acquireOllamaSlot(ctx); err == nil {
+	// Check for audio/video content first (always score low regardless of Ollama)
+	if isAudioVideoURL(targetURL) {
+		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, textContent)
+		aiUsed = false
+	} else if err := s.acquireOllamaSlot(ctx); err == nil {
 		var err error
 		score, reason, categories, maliciousIndicators, err = s.ollamaClient.ScoreContent(ctx, targetURL, title, textContent)
 		s.releaseOllamaSlot()
@@ -864,6 +971,40 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 	return linkScore, nil
 }
 
+// isAudioVideoURL checks if a URL points to audio/video content or streaming platforms
+func isAudioVideoURL(targetURL string) bool {
+	urlLower := strings.ToLower(targetURL)
+
+	// Check for audio/video file extensions
+	audioVideoExtensions := []string{
+		// Audio
+		".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".wma", ".opus", ".aiff",
+		// Video
+		".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpeg", ".mpg",
+	}
+
+	for _, ext := range audioVideoExtensions {
+		if strings.HasSuffix(urlLower, ext) || strings.Contains(urlLower, ext+"?") {
+			return true
+		}
+	}
+
+	// Check for streaming platforms
+	streamingPlatforms := []string{
+		"youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+		"twitch.tv", "soundcloud.com", "spotify.com", "music.apple.com",
+		"tidal.com", "deezer.com", "pandora.com", "music.youtube.com",
+	}
+
+	for _, platform := range streamingPlatforms {
+		if strings.Contains(urlLower, platform) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // scoreContentFallback provides rule-based content scoring when Ollama is unavailable
 func scoreContentFallback(targetURL, title, content string) (score float64, reason string, categories []string, maliciousIndicators []string) {
 	score = 0.5 // Start with neutral score
@@ -874,6 +1015,32 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 	urlLower := strings.ToLower(targetURL)
 	titleLower := strings.ToLower(title)
 	contentLower := strings.ToLower(content)
+
+	// Check for audio/video content using centralized detection
+	if isAudioVideoURL(targetURL) {
+		score = 0.15
+		// Determine if it's a file or streaming platform
+		if strings.Contains(urlLower, ".mp3") || strings.Contains(urlLower, ".wav") ||
+			strings.Contains(urlLower, ".ogg") || strings.Contains(urlLower, ".flac") ||
+			strings.Contains(urlLower, ".aac") || strings.Contains(urlLower, ".m4a") ||
+			strings.Contains(urlLower, ".mp4") || strings.Contains(urlLower, ".avi") ||
+			strings.Contains(urlLower, ".mkv") || strings.Contains(urlLower, ".mov") ||
+			strings.Contains(urlLower, ".webm") || strings.Contains(urlLower, ".wmv") ||
+			strings.Contains(urlLower, ".flv") || strings.Contains(urlLower, ".m4v") ||
+			strings.Contains(urlLower, ".mpeg") || strings.Contains(urlLower, ".mpg") ||
+			strings.Contains(urlLower, ".wma") || strings.Contains(urlLower, ".opus") ||
+			strings.Contains(urlLower, ".aiff") {
+			categories = append(categories, "media", "audio-video", "low-quality")
+			reasons = append(reasons, "Audio/video file detected")
+			maliciousIndicators = append(maliciousIndicators, "media_file")
+		} else {
+			categories = append(categories, "media", "streaming", "low-quality")
+			reasons = append(reasons, "Streaming platform detected")
+			maliciousIndicators = append(maliciousIndicators, "streaming_platform")
+		}
+		reason = strings.Join(reasons, "; ")
+		return
+	}
 
 	// Check for blocked content types (social media, gambling, adult, drugs, etc.)
 	blockedDomains := map[string]string{

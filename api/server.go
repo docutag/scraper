@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zombar/scraper"
@@ -51,8 +50,8 @@ func NewServer(config Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	// Initialize scraper
-	scraperInstance := scraper.New(config.ScraperConfig)
+	// Initialize scraper with database for image deduplication
+	scraperInstance := scraper.New(config.ScraperConfig, database)
 
 	s := &Server{
 		db:          database,
@@ -81,7 +80,6 @@ func NewServer(config Config) (*Server, error) {
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/scrape", s.handleScrape)
-	s.mux.HandleFunc("/api/scrape/batch", s.handleBatchScrape)
 	s.mux.HandleFunc("/api/extract-links", s.handleExtractLinks)
 	s.mux.HandleFunc("/api/score", s.handleScore)
 	s.mux.HandleFunc("/api/data/", s.handleData) // Handles /api/data/{id}
@@ -291,147 +289,6 @@ func (s *Server) handleScore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, response)
-}
-
-// BatchScrapeRequest represents a batch scrape request
-type BatchScrapeRequest struct {
-	URLs  []string `json:"urls"`
-	Force bool     `json:"force"`
-}
-
-// BatchScrapeResponse represents a batch scrape response
-type BatchScrapeResponse struct {
-	Results []BatchResult `json:"results"`
-	Summary BatchSummary  `json:"summary"`
-}
-
-// BatchResult represents a single result in a batch
-type BatchResult struct {
-	URL      string              `json:"url"`
-	Success  bool                `json:"success"`
-	Data     *models.ScrapedData `json:"data,omitempty"`
-	Error    string              `json:"error,omitempty"`
-	Cached   bool                `json:"cached"`
-	Warnings []string            `json:"warnings,omitempty"` // Non-fatal issues during processing
-}
-
-// BatchSummary provides summary statistics
-type BatchSummary struct {
-	Total   int `json:"total"`
-	Success int `json:"success"`
-	Failed  int `json:"failed"`
-	Cached  int `json:"cached"`
-	Scraped int `json:"scraped"`
-}
-
-// handleBatchScrape handles batch URL scraping
-func (s *Server) handleBatchScrape(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req BatchScrapeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if len(req.URLs) == 0 {
-		respondError(w, http.StatusBadRequest, "urls array is required")
-		return
-	}
-
-	if len(req.URLs) > 50 {
-		respondError(w, http.StatusBadRequest, "maximum 50 URLs per batch")
-		return
-	}
-
-	// Process URLs concurrently
-	results := make([]BatchResult, len(req.URLs))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for i, url := range req.URLs {
-		wg.Add(1)
-		go func(index int, targetURL string) {
-			defer wg.Done()
-
-			result := s.processSingleURL(r.Context(), targetURL, req.Force)
-
-			mu.Lock()
-			results[index] = result
-			mu.Unlock()
-		}(i, url)
-	}
-
-	wg.Wait()
-
-	// Calculate summary
-	summary := BatchSummary{Total: len(results)}
-	for _, r := range results {
-		if r.Success {
-			summary.Success++
-			if r.Cached {
-				summary.Cached++
-			} else {
-				summary.Scraped++
-			}
-		} else {
-			summary.Failed++
-		}
-	}
-
-	response := BatchScrapeResponse{
-		Results: results,
-		Summary: summary,
-	}
-
-	respondJSON(w, http.StatusOK, response)
-}
-
-// processSingleURL processes a single URL for batch scraping
-func (s *Server) processSingleURL(ctx context.Context, url string, force bool) BatchResult {
-	// Check cache first
-	if !force {
-		existing, err := s.db.GetByURL(url)
-		if err == nil && existing != nil {
-			// Mark as cached in the response
-			existing.Cached = true
-			return BatchResult{
-				URL:     url,
-				Success: true,
-				Data:    existing,
-				Cached:  true,
-			}
-		}
-	}
-
-	// Scrape the URL
-	scrapeCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	result, err := s.scraper.Scrape(scrapeCtx, url)
-	if err != nil {
-		return BatchResult{
-			URL:     url,
-			Success: false,
-			Error:   err.Error(),
-		}
-	}
-
-	// Save to database
-	if err := s.db.SaveScrapedData(result); err != nil {
-		log.Printf("Failed to save data for %s: %v", url, err)
-	}
-
-	return BatchResult{
-		URL:      url,
-		Success:  true,
-		Data:     result,
-		Cached:   false,
-		Warnings: result.Warnings,
-	}
 }
 
 // handleData handles GET (by ID) and DELETE operations

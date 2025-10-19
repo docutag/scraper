@@ -75,6 +75,16 @@ var migrations = []Migration{
 			DROP TABLE IF EXISTS images;
 		`,
 	},
+	{
+		Version: 4,
+		Name:    "add_images_url_index",
+		Up: `
+			CREATE INDEX IF NOT EXISTS idx_images_url ON images(url);
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_images_url;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations
