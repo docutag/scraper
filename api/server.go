@@ -407,21 +407,43 @@ func respondError(w http.ResponseWriter, status int, message string) {
 	})
 }
 
-// handleImage handles GET operations for individual images
+// handleImage handles GET, DELETE, and tombstone operations for individual images
 func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	// Extract ID from path
+	// Extract path from URL
 	path := strings.TrimPrefix(r.URL.Path, "/api/images/")
 	if path == "" {
 		respondError(w, http.StatusBadRequest, "id is required")
 		return
 	}
 
-	image, err := s.db.GetImageByID(path)
+	// Check if this is a tombstone operation
+	if strings.HasSuffix(path, "/tombstone") {
+		id := strings.TrimSuffix(path, "/tombstone")
+		switch r.Method {
+		case http.MethodPut:
+			s.handleTombstoneImage(w, r, id)
+		case http.MethodDelete:
+			s.handleUntombstoneImage(w, r, id)
+		default:
+			respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+
+	// Regular GET/DELETE operations
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetImage(w, r, path)
+	case http.MethodDelete:
+		s.handleDeleteImage(w, r, path)
+	default:
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleGetImage retrieves an image by ID
+func (s *Server) handleGetImage(w http.ResponseWriter, r *http.Request, id string) {
+	image, err := s.db.GetImageByID(id)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "database error")
 		return
@@ -433,6 +455,57 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, image)
+}
+
+// handleDeleteImage deletes an image by ID
+func (s *Server) handleDeleteImage(w http.ResponseWriter, r *http.Request, id string) {
+	err := s.db.DeleteImageByID(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "no image found") || strings.Contains(err.Error(), "not found") {
+			respondError(w, http.StatusNotFound, "image not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to delete image")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"message": "image deleted successfully",
+	})
+}
+
+// handleTombstoneImage tombstones an image by ID
+func (s *Server) handleTombstoneImage(w http.ResponseWriter, r *http.Request, id string) {
+	err := s.db.TombstoneImageByID(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "no image found") || strings.Contains(err.Error(), "not found") {
+			respondError(w, http.StatusNotFound, "image not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to tombstone image")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"message": "image tombstoned successfully",
+	})
+}
+
+// handleUntombstoneImage removes tombstone from an image by ID
+func (s *Server) handleUntombstoneImage(w http.ResponseWriter, r *http.Request, id string) {
+	err := s.db.UntombstoneImageByID(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "no image found") || strings.Contains(err.Error(), "not found") {
+			respondError(w, http.StatusNotFound, "image not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to untombstone image")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{
+		"message": "image untombstoned successfully",
+	})
 }
 
 // ImageSearchRequest represents a search request for images by tags

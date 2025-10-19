@@ -22,9 +22,10 @@ const (
 
 // Client is a client for interacting with Ollama
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	model      string
+	baseURL     string
+	httpClient  *http.Client
+	model       string
+	visionModel string
 }
 
 // NewClient creates a new Ollama client
@@ -40,7 +41,29 @@ func NewClient(baseURL, model string) *Client {
 		httpClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
-		model: model,
+		model:       model,
+		visionModel: model, // Default to same model for backward compatibility
+	}
+}
+
+// NewClientWithVisionModel creates a new Ollama client with separate vision model
+func NewClientWithVisionModel(baseURL, model, visionModel string) *Client {
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
+	if model == "" {
+		model = DefaultModel
+	}
+	if visionModel == "" {
+		visionModel = model // Fall back to text model if not specified
+	}
+	return &Client{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: DefaultTimeout,
+		},
+		model:       model,
+		visionModel: visionModel,
 	}
 }
 
@@ -88,7 +111,7 @@ func (c *Client) GenerateWithVision(ctx context.Context, prompt string, imageDat
 	encodedImage := base64.StdEncoding.EncodeToString(imageData)
 
 	reqBody := models.OllamaVisionRequest{
-		Model:  c.model,
+		Model:  c.visionModel, // Use vision model instead of text model
 		Prompt: prompt,
 		Images: []string{encodedImage},
 		Stream: false,
@@ -167,7 +190,7 @@ Format your response as JSON with the following structure:
 	}
 
 	// Strip markdown code blocks if present
-	response = stripMarkdownCodeBlocks(response)
+	response = StripMarkdownCodeBlocks(response)
 
 	// Parse JSON response
 	var result struct {
@@ -212,9 +235,9 @@ func normalizeTag(tag string) string {
 	return tag
 }
 
-// stripMarkdownCodeBlocks removes markdown code block wrappers from a string
+// StripMarkdownCodeBlocks removes markdown code block wrappers from a string
 // This handles cases like ```json\n{...}\n``` and returns just the {...} content
-func stripMarkdownCodeBlocks(s string) string {
+func StripMarkdownCodeBlocks(s string) string {
 	// Trim whitespace
 	s = string(bytes.TrimSpace([]byte(s)))
 
@@ -298,7 +321,7 @@ Malicious indicators should list any suspicious patterns detected: "phishing", "
 	}
 
 	// Strip markdown code blocks if present
-	response = stripMarkdownCodeBlocks(response)
+	response = StripMarkdownCodeBlocks(response)
 
 	// Parse JSON response
 	var result struct {

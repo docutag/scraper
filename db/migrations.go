@@ -85,6 +85,16 @@ var migrations = []Migration{
 			DROP INDEX IF EXISTS idx_images_url;
 		`,
 	},
+	{
+		Version: 5,
+		Name:    "add_tombstone_datetime_to_images",
+		Up: `
+			ALTER TABLE images ADD COLUMN tombstone_datetime TIMESTAMP;
+		`,
+		Down: `
+			ALTER TABLE images DROP COLUMN tombstone_datetime;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

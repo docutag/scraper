@@ -635,3 +635,216 @@ func TestImageCascadeDelete(t *testing.T) {
 		t.Error("Image should have been deleted via cascade")
 	}
 }
+
+func TestTombstoneImageByID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Create a scraped data with an image
+	data := &models.ScrapedData{
+		ID:      "tombstone-test",
+		URL:     "https://example.com/tombstone",
+		Title:   "Tombstone Test",
+		Content: "Test content",
+		Images: []models.ImageInfo{
+			{
+				ID:      "tombstone-img",
+				URL:     "https://example.com/tombstone.jpg",
+				AltText: "Tombstone test image",
+				Tags:    []string{"test"},
+			},
+		},
+		FetchedAt:      time.Now(),
+		ProcessingTime: 1.0,
+	}
+
+	err := db.SaveScrapedData(data)
+	if err != nil {
+		t.Fatalf("Failed to save data: %v", err)
+	}
+
+	// Verify image exists without tombstone
+	img, err := db.GetImageByID("tombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to get image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Image should exist")
+	}
+	if img.TombstoneDatetime != nil {
+		t.Error("Image should not have tombstone_datetime initially")
+	}
+
+	// Tombstone the image
+	err = db.TombstoneImageByID("tombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to tombstone image: %v", err)
+	}
+
+	// Verify image now has tombstone_datetime
+	img, err = db.GetImageByID("tombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to get tombstoned image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Tombstoned image should still exist")
+	}
+	if img.TombstoneDatetime == nil {
+		t.Error("Image should have tombstone_datetime after tombstoning")
+	}
+	if time.Since(*img.TombstoneDatetime) > time.Minute {
+		t.Error("Tombstone datetime should be recent")
+	}
+}
+
+func TestTombstoneImageByIDNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	err := db.TombstoneImageByID("non-existent-img")
+	if err == nil {
+		t.Error("Expected error for non-existent image")
+	}
+	if err.Error() != "no image found with id: non-existent-img" {
+		t.Errorf("Expected 'no image found' error, got: %v", err)
+	}
+}
+
+func TestUntombstoneImageByID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Create a scraped data with an image
+	data := &models.ScrapedData{
+		ID:      "untombstone-test",
+		URL:     "https://example.com/untombstone",
+		Title:   "Untombstone Test",
+		Content: "Test content",
+		Images: []models.ImageInfo{
+			{
+				ID:      "untombstone-img",
+				URL:     "https://example.com/untombstone.jpg",
+				AltText: "Untombstone test image",
+				Tags:    []string{"test"},
+			},
+		},
+		FetchedAt:      time.Now(),
+		ProcessingTime: 1.0,
+	}
+
+	err := db.SaveScrapedData(data)
+	if err != nil {
+		t.Fatalf("Failed to save data: %v", err)
+	}
+
+	// Tombstone the image first
+	err = db.TombstoneImageByID("untombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to tombstone image: %v", err)
+	}
+
+	// Verify it has tombstone_datetime
+	img, err := db.GetImageByID("untombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to get image: %v", err)
+	}
+	if img.TombstoneDatetime == nil {
+		t.Fatal("Image should have tombstone_datetime")
+	}
+
+	// Untombstone the image
+	err = db.UntombstoneImageByID("untombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to untombstone image: %v", err)
+	}
+
+	// Verify tombstone_datetime is removed
+	img, err = db.GetImageByID("untombstone-img")
+	if err != nil {
+		t.Fatalf("Failed to get untombstoned image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Image should still exist after untombstone")
+	}
+	if img.TombstoneDatetime != nil {
+		t.Error("Image should not have tombstone_datetime after untombstoning")
+	}
+}
+
+func TestUntombstoneImageByIDNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	err := db.UntombstoneImageByID("non-existent-img")
+	if err == nil {
+		t.Error("Expected error for non-existent image")
+	}
+	if err.Error() != "no image found with id: non-existent-img" {
+		t.Errorf("Expected 'no image found' error, got: %v", err)
+	}
+}
+
+func TestDeleteImageByID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Create a scraped data with an image
+	data := &models.ScrapedData{
+		ID:      "delete-img-test",
+		URL:     "https://example.com/deleteimg",
+		Title:   "Delete Image Test",
+		Content: "Test content",
+		Images: []models.ImageInfo{
+			{
+				ID:      "delete-img",
+				URL:     "https://example.com/delete.jpg",
+				AltText: "Delete test image",
+				Tags:    []string{"test"},
+			},
+		},
+		FetchedAt:      time.Now(),
+		ProcessingTime: 1.0,
+	}
+
+	err := db.SaveScrapedData(data)
+	if err != nil {
+		t.Fatalf("Failed to save data: %v", err)
+	}
+
+	// Verify image exists
+	img, err := db.GetImageByID("delete-img")
+	if err != nil {
+		t.Fatalf("Failed to get image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Image should exist")
+	}
+
+	// Delete the image
+	err = db.DeleteImageByID("delete-img")
+	if err != nil {
+		t.Fatalf("Failed to delete image: %v", err)
+	}
+
+	// Verify image no longer exists
+	img, err = db.GetImageByID("delete-img")
+	if err != nil {
+		t.Fatalf("Failed to get deleted image: %v", err)
+	}
+	if img != nil {
+		t.Error("Image should not exist after deletion")
+	}
+}
+
+func TestDeleteImageByIDNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	err := db.DeleteImageByID("non-existent-img")
+	if err == nil {
+		t.Error("Expected error for non-existent image")
+	}
+	if err.Error() != "no image found with id: non-existent-img" {
+		t.Errorf("Expected 'no image found' error, got: %v", err)
+	}
+}

@@ -30,6 +30,7 @@ func main() {
 	defaultDBPath := getEnv("DB_PATH", "scraper.db")
 	defaultOllamaURL := getEnv("OLLAMA_URL", "http://localhost:11434")
 	defaultOllamaModel := getEnv("OLLAMA_MODEL", "gpt-oss:20b")
+	defaultOllamaVisionModel := getEnv("OLLAMA_VISION_MODEL", defaultOllamaModel) // Default to same as text model if not specified
 	defaultLinkScoreThreshold := getEnv("LINK_SCORE_THRESHOLD", "0.5")
 
 	// Parse link score threshold
@@ -43,7 +44,8 @@ func main() {
 	port := flag.String("port", defaultPort, "Server port")
 	dbPath := flag.String("db", defaultDBPath, "Database file path")
 	ollamaURL := flag.String("ollama-url", defaultOllamaURL, "Ollama base URL")
-	ollamaModel := flag.String("ollama-model", defaultOllamaModel, "Ollama model to use")
+	ollamaModel := flag.String("ollama-model", defaultOllamaModel, "Ollama model to use for text generation")
+	ollamaVisionModel := flag.String("ollama-vision-model", defaultOllamaVisionModel, "Ollama model to use for vision tasks")
 	scoreThreshold := flag.Float64("link-score-threshold", linkScoreThreshold, "Minimum score for link recommendation (0.0-1.0)")
 	disableCORS := flag.Bool("disable-cors", false, "Disable CORS")
 	disableImageAnalysis := flag.Bool("disable-image-analysis", false, "Disable AI-powered image analysis")
@@ -60,6 +62,7 @@ func main() {
 			HTTPTimeout:         30 * time.Second,
 			OllamaBaseURL:       *ollamaURL,
 			OllamaModel:         *ollamaModel,
+			OllamaVisionModel:   *ollamaVisionModel,
 			EnableImageAnalysis: !*disableImageAnalysis,
 			MaxImageSizeBytes:   10 * 1024 * 1024, // 10MB
 			ImageTimeout:        15 * time.Second,

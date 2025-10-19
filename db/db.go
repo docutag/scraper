@@ -308,16 +308,17 @@ func (db *DB) SaveImage(image *models.ImageInfo, scrapeID string) error {
 // GetImageByID retrieves an image by its ID
 func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 	var (
-		imageID     string
-		url         string
-		altText     string
-		summary     string
-		tagsJSON    string
-		base64Data  string
+		imageID           string
+		url               string
+		altText           string
+		summary           string
+		tagsJSON          string
+		base64Data        string
+		tombstoneDatetime sql.NullTime
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, base64_data FROM images WHERE id = ?"
-	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data)
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime FROM images WHERE id = ?"
+	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -340,6 +341,9 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 		Summary:    summary,
 		Tags:       tags,
 		Base64Data: base64Data,
+	}
+	if tombstoneDatetime.Valid {
+		image.TombstoneDatetime = &tombstoneDatetime.Time
 	}
 
 	return image, nil
@@ -393,7 +397,7 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 	}
 
 	// Query all images
-	query := "SELECT id, url, alt_text, summary, tags, base64_data FROM images ORDER BY created_at DESC"
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime FROM images ORDER BY created_at DESC"
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query images: %w", err)
@@ -403,15 +407,16 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 	results := []*models.ImageInfo{}
 	for rows.Next() {
 		var (
-			imageID    string
-			url        string
-			altText    string
-			summary    string
-			tagsJSON   string
-			base64Data string
+			imageID           string
+			url               string
+			altText           string
+			summary           string
+			tagsJSON          string
+			base64Data        string
+			tombstoneDatetime sql.NullTime
 		)
 
-		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data); err != nil {
+		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -447,6 +452,9 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 				Tags:       tags,
 				Base64Data: base64Data,
 			}
+			if tombstoneDatetime.Valid {
+				image.TombstoneDatetime = &tombstoneDatetime.Time
+			}
 			results = append(results, image)
 		}
 	}
@@ -460,7 +468,7 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 
 // GetImagesByScrapeID retrieves all images associated with a scrape ID
 func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) {
-	query := "SELECT id, url, alt_text, summary, tags, base64_data FROM images WHERE scrape_id = ? ORDER BY created_at"
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime FROM images WHERE scrape_id = ? ORDER BY created_at"
 	rows, err := db.conn.Query(query, scrapeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query images: %w", err)
@@ -470,15 +478,16 @@ func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) 
 	var results []*models.ImageInfo
 	for rows.Next() {
 		var (
-			imageID    string
-			url        string
-			altText    string
-			summary    string
-			tagsJSON   string
-			base64Data string
+			imageID           string
+			url               string
+			altText           string
+			summary           string
+			tagsJSON          string
+			base64Data        string
+			tombstoneDatetime sql.NullTime
 		)
 
-		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data); err != nil {
+		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -497,6 +506,9 @@ func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) 
 			Tags:       tags,
 			Base64Data: base64Data,
 		}
+		if tombstoneDatetime.Valid {
+			image.TombstoneDatetime = &tombstoneDatetime.Time
+		}
 		results = append(results, image)
 	}
 
@@ -505,4 +517,68 @@ func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) 
 	}
 
 	return results, nil
+}
+
+// DeleteImageByID deletes an image by its ID
+func (db *DB) DeleteImageByID(id string) error {
+	result, err := db.conn.Exec("DELETE FROM images WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("failed to delete image: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no image found with id: %s", id)
+	}
+
+	return nil
+}
+
+// TombstoneImageByID sets the tombstone_datetime for an image
+func (db *DB) TombstoneImageByID(id string) error {
+	result, err := db.conn.Exec(
+		"UPDATE images SET tombstone_datetime = ? WHERE id = ?",
+		time.Now().UTC(),
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to tombstone image: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no image found with id: %s", id)
+	}
+
+	return nil
+}
+
+// UntombstoneImageByID removes the tombstone_datetime for an image
+func (db *DB) UntombstoneImageByID(id string) error {
+	result, err := db.conn.Exec(
+		"UPDATE images SET tombstone_datetime = NULL WHERE id = ?",
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to untombstone image: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("no image found with id: %s", id)
+	}
+
+	return nil
 }

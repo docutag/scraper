@@ -111,6 +111,15 @@ func TestGetEnvWithRealEnvVars(t *testing.T) {
 			defaultValue: "gpt-oss:20b",
 			want:         "llama3.1",
 		},
+		{
+			name: "OLLAMA_VISION_MODEL environment variable",
+			envVars: map[string]string{
+				"OLLAMA_VISION_MODEL": "llama3.2-vision:latest",
+			},
+			key:          "OLLAMA_VISION_MODEL",
+			defaultValue: "gpt-oss:20b",
+			want:         "llama3.2-vision:latest",
+		},
 	}
 
 	for _, tt := range tests {

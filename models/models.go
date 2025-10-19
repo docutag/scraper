@@ -21,12 +21,39 @@ type ScrapedData struct {
 
 // ImageInfo contains information about an extracted image
 type ImageInfo struct {
-	ID         string   `json:"id,omitempty"` // UUID for the image
-	URL        string   `json:"url"`
-	AltText    string   `json:"alt_text"`
-	Summary    string   `json:"summary"`
-	Tags       []string `json:"tags"`
-	Base64Data string   `json:"base64_data,omitempty"` // Base64 encoded image data
+	ID                 string     `json:"id,omitempty"` // UUID for the image
+	URL                string     `json:"url"`
+	AltText            string     `json:"alt_text"`
+	Summary            string     `json:"summary"`
+	Tags               []string   `json:"tags"`
+	Base64Data         string     `json:"base64_data,omitempty"` // Base64 encoded image data
+	TombstoneDatetime  *time.Time `json:"tombstone_datetime,omitempty"` // When the image was tombstoned
+	Width              int        `json:"width,omitempty"`       // Image width in pixels
+	Height             int        `json:"height,omitempty"`      // Image height in pixels
+	FileSizeBytes      int64      `json:"file_size_bytes,omitempty"` // File size in bytes
+	ContentType        string     `json:"content_type,omitempty"` // MIME type (e.g., "image/jpeg")
+	EXIF               *EXIFData  `json:"exif,omitempty"`        // EXIF metadata from image file
+}
+
+// EXIFData contains EXIF metadata extracted from an image
+type EXIFData struct {
+	DateTime         string   `json:"date_time,omitempty"`          // When photo was taken (EXIF DateTime)
+	DateTimeOriginal string   `json:"date_time_original,omitempty"` // Original date/time (EXIF DateTimeOriginal)
+	Make             string   `json:"make,omitempty"`               // Camera manufacturer
+	Model            string   `json:"model,omitempty"`              // Camera model
+	Copyright        string   `json:"copyright,omitempty"`          // Copyright notice
+	Artist           string   `json:"artist,omitempty"`             // Photographer/creator name
+	Software         string   `json:"software,omitempty"`           // Software used to process image
+	ImageDescription string   `json:"image_description,omitempty"`  // Embedded image description
+	Orientation      int      `json:"orientation,omitempty"`        // Image orientation (1-8)
+	GPS              *GPSData `json:"gps,omitempty"`                // GPS location data
+}
+
+// GPSData contains GPS coordinates from EXIF
+type GPSData struct {
+	Latitude  float64 `json:"latitude"`            // GPS latitude in decimal degrees
+	Longitude float64 `json:"longitude"`           // GPS longitude in decimal degrees
+	Altitude  float64 `json:"altitude,omitempty"`  // GPS altitude in meters
 }
 
 // PageMetadata contains additional metadata about the scraped page
