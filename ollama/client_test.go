@@ -346,3 +346,66 @@ func TestTruncateString(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeTag(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "lowercase conversion",
+			input:    "Machine Learning",
+			expected: "machine-learning",
+		},
+		{
+			name:     "underscore to hyphen",
+			input:    "social_media",
+			expected: "social-media",
+		},
+		{
+			name:     "multiple spaces",
+			input:    "Golden  Gate  Bridge",
+			expected: "golden-gate-bridge",
+		},
+		{
+			name:     "mixed spaces and underscores",
+			input:    "urban_architecture space",
+			expected: "urban-architecture-space",
+		},
+		{
+			name:     "leading and trailing spaces",
+			input:    "  picasso  ",
+			expected: "picasso",
+		},
+		{
+			name:     "multiple consecutive hyphens",
+			input:    "foo--bar---baz",
+			expected: "foo-bar-baz",
+		},
+		{
+			name:     "already normalized",
+			input:    "sunset",
+			expected: "sunset",
+		},
+		{
+			name:     "single word uppercase",
+			input:    "LANDSCAPE",
+			expected: "landscape",
+		},
+		{
+			name:     "category tag",
+			input:    "adult_content",
+			expected: "adult-content",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := normalizeTag(tt.input)
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}

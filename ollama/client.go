@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/zombar/scraper/models"
@@ -141,7 +142,14 @@ Extracted content:`, rawText)
 func (c *Client) AnalyzeImage(ctx context.Context, imageData []byte, altText string) (summary string, tags []string, err error) {
 	prompt := `Analyze this image and provide:
 1. A 4-5 sentence summary describing what you see
-2. A list of 5-10 relevant tags for categorizing the image
+2. A list of up to 10 relevant tags for categorizing the image
+
+Tag formatting rules:
+- Prefer single-word tags whenever possible
+- Multi-word tags should use hyphens only (no spaces or underscores)
+- Names of people, places, and things make excellent tags
+- All tags should be lowercase
+- Examples: "landscape", "urban-architecture", "golden-gate-bridge", "sunset", "picasso"
 
 Format your response as JSON with the following structure:
 {
@@ -172,7 +180,36 @@ Format your response as JSON with the following structure:
 		return response, []string{}, nil
 	}
 
+	// Normalize tags
+	for i, tag := range result.Tags {
+		result.Tags[i] = normalizeTag(tag)
+	}
+
 	return result.Summary, result.Tags, nil
+}
+
+// normalizeTag normalizes a tag according to the tagging rules:
+// - Converts to lowercase
+// - Replaces spaces and underscores with hyphens
+// - Removes multiple consecutive hyphens
+// - Trims leading/trailing hyphens and whitespace
+func normalizeTag(tag string) string {
+	// Convert to lowercase
+	tag = strings.ToLower(tag)
+
+	// Replace spaces and underscores with hyphens
+	tag = strings.ReplaceAll(tag, " ", "-")
+	tag = strings.ReplaceAll(tag, "_", "-")
+
+	// Remove multiple consecutive hyphens
+	for strings.Contains(tag, "--") {
+		tag = strings.ReplaceAll(tag, "--", "-")
+	}
+
+	// Trim leading/trailing hyphens and whitespace
+	tag = strings.Trim(tag, "- \t\n\r")
+
+	return tag
 }
 
 // stripMarkdownCodeBlocks removes markdown code block wrappers from a string
@@ -289,6 +326,11 @@ Malicious indicators should list any suspicious patterns detected: "phishing", "
 	}
 	if result.MaliciousIndicators == nil {
 		result.MaliciousIndicators = []string{}
+	}
+
+	// Normalize all categories
+	for i, category := range result.Categories {
+		result.Categories[i] = normalizeTag(category)
 	}
 
 	return result.Score, result.Reason, result.Categories, result.MaliciousIndicators, nil

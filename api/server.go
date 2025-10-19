@@ -307,11 +307,12 @@ type BatchScrapeResponse struct {
 
 // BatchResult represents a single result in a batch
 type BatchResult struct {
-	URL     string              `json:"url"`
-	Success bool                `json:"success"`
-	Data    *models.ScrapedData `json:"data,omitempty"`
-	Error   string              `json:"error,omitempty"`
-	Cached  bool                `json:"cached"`
+	URL      string              `json:"url"`
+	Success  bool                `json:"success"`
+	Data     *models.ScrapedData `json:"data,omitempty"`
+	Error    string              `json:"error,omitempty"`
+	Cached   bool                `json:"cached"`
+	Warnings []string            `json:"warnings,omitempty"` // Non-fatal issues during processing
 }
 
 // BatchSummary provides summary statistics
@@ -425,10 +426,11 @@ func (s *Server) processSingleURL(ctx context.Context, url string, force bool) B
 	}
 
 	return BatchResult{
-		URL:     url,
-		Success: true,
-		Data:    result,
-		Cached:  false,
+		URL:      url,
+		Success:  true,
+		Data:     result,
+		Cached:   false,
+		Warnings: result.Warnings,
 	}
 }
 

@@ -16,6 +16,7 @@ type ScrapedData struct {
 	Cached         bool         `json:"cached"`
 	Metadata       PageMetadata `json:"metadata"`
 	Score          *LinkScore   `json:"score,omitempty"` // Quality score for the URL
+	Warnings       []string     `json:"warnings,omitempty"` // Non-fatal processing warnings
 }
 
 // ImageInfo contains information about an extracted image

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,25 +45,46 @@ func DefaultConfig() Config {
 
 // Scraper handles web scraping operations
 type Scraper struct {
-	config       Config
-	httpClient   *http.Client
-	ollamaClient *ollama.Client
+	config         Config
+	httpClient     *http.Client
+	ollamaClient   *ollama.Client
+	ollamaSemaphore chan struct{} // Semaphore to limit concurrent Ollama requests
 }
 
 // New creates a new Scraper instance
 func New(config Config) *Scraper {
+	// Limit concurrent Ollama requests to 3 to prevent overload during batch operations
+	maxConcurrentOllamaRequests := 3
+
 	return &Scraper{
 		config: config,
 		httpClient: &http.Client{
 			Timeout: config.HTTPTimeout,
 		},
-		ollamaClient: ollama.NewClient(config.OllamaBaseURL, config.OllamaModel),
+		ollamaClient:    ollama.NewClient(config.OllamaBaseURL, config.OllamaModel),
+		ollamaSemaphore: make(chan struct{}, maxConcurrentOllamaRequests),
 	}
+}
+
+// acquireOllamaSlot acquires a slot in the Ollama semaphore or returns error if context is cancelled
+func (s *Scraper) acquireOllamaSlot(ctx context.Context) error {
+	select {
+	case s.ollamaSemaphore <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releaseOllamaSlot releases a slot in the Ollama semaphore
+func (s *Scraper) releaseOllamaSlot() {
+	<-s.ollamaSemaphore
 }
 
 // Scrape fetches and processes a URL
 func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.ScrapedData, error) {
 	start := time.Now()
+	warnings := []string{} // Track non-fatal processing issues
 
 	// Validate URL
 	parsedURL, err := url.Parse(targetURL)
@@ -106,17 +128,27 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	textContent := extractText(doc)
 
 	// Use Ollama to extract meaningful content
-	content, err := s.ollamaClient.ExtractContent(ctx, textContent)
-	if err != nil {
-		// If Ollama extraction fails, fall back to raw text
-		content = textContent
+	content := textContent // Default to raw text
+	if err := s.acquireOllamaSlot(ctx); err == nil {
+		extractedContent, err := s.ollamaClient.ExtractContent(ctx, textContent)
+		s.releaseOllamaSlot()
+		if err != nil {
+			log.Printf("Ollama content extraction failed for %s, using raw text: %v", targetURL, err)
+			warnings = append(warnings, "AI content extraction unavailable, using raw text")
+		} else {
+			content = extractedContent
+		}
+	} else {
+		log.Printf("Context cancelled while waiting for Ollama slot for content extraction: %v", err)
+		warnings = append(warnings, "Content extraction timed out, using raw text")
 	}
 
 	// Extract images
 	images := extractImages(doc, parsedURL)
 
 	// Process images (download and analyze if enabled)
-	images = s.processImages(ctx, images)
+	images, imageWarnings := s.processImages(ctx, images)
+	warnings = append(warnings, imageWarnings...)
 
 	// Extract links with Ollama sanitization
 	links := s.extractLinksWithOllama(ctx, doc, parsedURL, title, content)
@@ -125,31 +157,41 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	metadata := extractMetadata(doc)
 
 	// Score the content (with fallback to rule-based scoring)
-	score, reason, categories, maliciousIndicators, err := s.ollamaClient.ScoreContent(ctx, targetURL, title, content)
-	var linkScore *models.LinkScore
-	if err != nil {
-		// Fallback to rule-based scoring when Ollama is unavailable
-		log.Printf("Ollama scoring failed for %s, using rule-based fallback: %v", targetURL, err)
-		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
-		linkScore = &models.LinkScore{
-			URL:                 targetURL,
-			Score:               score,
-			Reason:              reason,
-			Categories:          categories,
-			IsRecommended:       score >= s.config.LinkScoreThreshold,
-			MaliciousIndicators: maliciousIndicators,
-			AIUsed:              false, // Rule-based fallback
+	var score float64
+	var reason string
+	var categories []string
+	var maliciousIndicators []string
+	var aiUsed bool
+
+	if err := s.acquireOllamaSlot(ctx); err == nil {
+		var err error
+		score, reason, categories, maliciousIndicators, err = s.ollamaClient.ScoreContent(ctx, targetURL, title, content)
+		s.releaseOllamaSlot()
+		if err != nil {
+			// Fallback to rule-based scoring when Ollama fails
+			log.Printf("Ollama scoring failed for %s, using rule-based fallback: %v", targetURL, err)
+			score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
+			aiUsed = false
+			warnings = append(warnings, "AI scoring unavailable, using rule-based scoring")
+		} else {
+			aiUsed = true
 		}
 	} else {
-		linkScore = &models.LinkScore{
-			URL:                 targetURL,
-			Score:               score,
-			Reason:              reason,
-			Categories:          categories,
-			IsRecommended:       score >= s.config.LinkScoreThreshold,
-			MaliciousIndicators: maliciousIndicators,
-			AIUsed:              true, // AI-powered scoring
-		}
+		// Context cancelled, use rule-based fallback
+		log.Printf("Context cancelled while waiting for Ollama slot for scoring: %v", err)
+		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
+		aiUsed = false
+		warnings = append(warnings, "Scoring timed out, using rule-based scoring")
+	}
+
+	linkScore := &models.LinkScore{
+		URL:                 targetURL,
+		Score:               score,
+		Reason:              reason,
+		Categories:          categories,
+		IsRecommended:       score >= s.config.LinkScoreThreshold,
+		MaliciousIndicators: maliciousIndicators,
+		AIUsed:              aiUsed,
 	}
 
 	// Create scraped data
@@ -166,6 +208,7 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		Cached:         false,
 		Metadata:       metadata,
 		Score:          linkScore,
+		Warnings:       warnings,
 	}
 
 	return data, nil
@@ -215,10 +258,17 @@ func (s *Scraper) ExtractLinks(ctx context.Context, targetURL string) ([]string,
 	textContent := extractText(doc)
 
 	// Use Ollama to extract meaningful content
-	content, err := s.ollamaClient.ExtractContent(ctx, textContent)
-	if err != nil {
-		// If Ollama extraction fails, fall back to raw text
-		content = textContent
+	content := textContent // Default to raw text
+	if err := s.acquireOllamaSlot(ctx); err == nil {
+		extractedContent, err := s.ollamaClient.ExtractContent(ctx, textContent)
+		s.releaseOllamaSlot()
+		if err != nil {
+			log.Printf("Ollama content extraction failed for %s, using raw text: %v", targetURL, err)
+		} else {
+			content = extractedContent
+		}
+	} else {
+		log.Printf("Context cancelled while waiting for Ollama slot for content extraction: %v", err)
 	}
 
 	// Extract links with Ollama sanitization and fallback
@@ -365,17 +415,26 @@ Format: ["url1", "url2", "url3"]`,
 		pageContent,
 		string(linksJSON))
 
-	response, err := s.ollamaClient.Generate(ctx, prompt)
-	if err != nil {
-		// If Ollama fails, fall back to returning all links
-		return allLinks
-	}
-
-	// Parse JSON response
-	var sanitizedLinks []string
-	if err := json.Unmarshal([]byte(response), &sanitizedLinks); err != nil {
-		// If parsing fails, fall back to returning all links
-		return allLinks
+	// Use Ollama with semaphore protection
+	sanitizedLinks := allLinks // Default to all links
+	if err := s.acquireOllamaSlot(ctx); err == nil {
+		response, err := s.ollamaClient.Generate(ctx, prompt)
+		s.releaseOllamaSlot()
+		if err != nil {
+			// If Ollama fails, fall back to returning all links
+			log.Printf("Ollama link sanitization failed, returning all links: %v", err)
+		} else {
+			// Parse JSON response
+			var parsedLinks []string
+			if err := json.Unmarshal([]byte(response), &parsedLinks); err != nil {
+				// If parsing fails, fall back to returning all links
+				log.Printf("Failed to parse Ollama link response, returning all links: %v", err)
+			} else if parsedLinks != nil {
+				sanitizedLinks = parsedLinks
+			}
+		}
+	} else {
+		log.Printf("Context cancelled while waiting for Ollama slot for link sanitization: %v", err)
 	}
 
 	// Ensure we never return nil
@@ -508,54 +567,203 @@ func (s *Scraper) downloadImage(ctx context.Context, imageURL string) ([]byte, e
 	return imageData, nil
 }
 
-// processImages downloads and analyzes images if image analysis is enabled
-func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) []models.ImageInfo {
-	if !s.config.EnableImageAnalysis {
-		log.Printf("Image analysis disabled, returning %d images without analysis", len(images))
-		return images
+// shouldSkipImage determines if an image should be skipped based on URL patterns
+// Returns true if the image appears to be a placeholder, temp file, UI component, or other junk data
+func shouldSkipImage(imageURL string) bool {
+	urlLower := strings.ToLower(imageURL)
+
+	// Skip images with placeholder or temp in the name
+	skipKeywords := []string{
+		"placeholder",
+		"temp",
+		"temporary",
+		// UI components
+		"icon",
+		"logo",
+		"button",
+		"sprite",
+		"avatar-default",
+		"default-avatar",
+		"generic-avatar",
+		// Tracking pixels and spacers
+		"1x1",
+		"pixel",
+		"tracking",
+		"spacer",
+		"blank",
+		"transparent",
+		// Social media buttons
+		"share-button",
+		"facebook-icon",
+		"twitter-icon",
+		"social-icon",
+		// Ads and promotional
+		"ad-banner",
+		"advertisement",
+		"promo",
+		// Common junk patterns
+		"spinner",
+		"loader",
+		"loading",
+		"thumbnail-placeholder",
 	}
 
-	processedImages := make([]models.ImageInfo, 0, len(images))
-
-	for i, img := range images {
-		log.Printf("Processing image %d/%d: %s", i+1, len(images), img.URL)
-
-		// Generate UUID for the image
-		img.ID = uuid.New().String()
-
-		// Download the image
-		imageData, err := s.downloadImage(ctx, img.URL)
-		if err != nil {
-			log.Printf("Failed to download image %s: %v", img.URL, err)
-			// Keep the image info but without analysis
-			processedImages = append(processedImages, img)
-			continue
+	for _, keyword := range skipKeywords {
+		if strings.Contains(urlLower, keyword) {
+			return true
 		}
+	}
 
-		log.Printf("Downloaded image %s (%d bytes)", img.URL, len(imageData))
+	return false
+}
 
-		// Store base64 encoded image data
-		img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+// processImages downloads and analyzes images if image analysis is enabled
+// Uses parallel processing with worker pool for better performance
+// Returns processed images and any warnings encountered
+func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) ([]models.ImageInfo, []string) {
+	warnings := []string{}
 
-		// Analyze the image with Ollama
+	if !s.config.EnableImageAnalysis {
+		log.Printf("Image analysis disabled, returning %d images without analysis", len(images))
+		return images, warnings
+	}
+
+	if len(images) == 0 {
+		return images, warnings
+	}
+
+	// Filter out placeholder, temp, UI component, and junk images
+	filteredImages := make([]models.ImageInfo, 0, len(images))
+	skippedCount := 0
+	for _, img := range images {
+		if shouldSkipImage(img.URL) {
+			log.Printf("Skipping junk image: %s", img.URL)
+			skippedCount++
+		} else {
+			filteredImages = append(filteredImages, img)
+		}
+	}
+
+	if skippedCount > 0 {
+		log.Printf("Filtered out %d junk images (placeholder/temp/UI components)", skippedCount)
+		warnings = append(warnings, fmt.Sprintf("Skipped %d placeholder/temp/UI component images", skippedCount))
+	}
+
+	// If all images were filtered out, return early
+	if len(filteredImages) == 0 {
+		log.Printf("All %d images were filtered out as junk", len(images))
+		return []models.ImageInfo{}, warnings
+	}
+
+	// Use filtered images for processing
+	images = filteredImages
+
+	// Use a worker pool for parallel image processing
+	const maxWorkers = 5
+	numWorkers := min(maxWorkers, len(images))
+
+	type imageJob struct {
+		index int
+		img   models.ImageInfo
+	}
+
+	type imageResult struct {
+		index   int
+		img     models.ImageInfo
+		warning string
+	}
+
+	jobs := make(chan imageJob, len(images))
+	results := make(chan imageResult, len(images))
+
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				img, warning := s.processSingleImage(ctx, job.img)
+				results <- imageResult{index: job.index, img: img, warning: warning}
+			}
+		}()
+	}
+
+	// Send jobs
+	for i, img := range images {
+		jobs <- imageJob{index: i, img: img}
+	}
+	close(jobs)
+
+	// Wait for all workers to finish
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results in order
+	processedImages := make([]models.ImageInfo, len(images))
+	failedAnalysis := 0
+	for result := range results {
+		processedImages[result.index] = result.img
+		if result.warning != "" {
+			failedAnalysis++
+		}
+	}
+
+	// Add summary warning if some images failed
+	if failedAnalysis > 0 {
+		warnings = append(warnings, fmt.Sprintf("AI analysis failed for %d/%d images", failedAnalysis, len(images)))
+	}
+
+	return processedImages, warnings
+}
+
+// processSingleImage processes a single image (download and analyze)
+// Returns the processed image and a warning string (empty if no issues)
+func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) (models.ImageInfo, string) {
+	// Generate UUID for the image
+	img.ID = uuid.New().String()
+
+	// Download the image
+	imageData, err := s.downloadImage(ctx, img.URL)
+	if err != nil {
+		log.Printf("Failed to download image %s: %v", img.URL, err)
+		return img, "download_failed"
+	}
+
+	log.Printf("Downloaded image %s (%d bytes)", img.URL, len(imageData))
+
+	// Store base64 encoded image data
+	img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+
+	// Analyze the image with Ollama (with semaphore protection)
+	if err := s.acquireOllamaSlot(ctx); err == nil {
 		summary, tags, err := s.ollamaClient.AnalyzeImage(ctx, imageData, img.AltText)
+		s.releaseOllamaSlot()
 		if err != nil {
 			log.Printf("Failed to analyze image %s: %v", img.URL, err)
-			// Keep the image info with base64 data but without analysis
-			processedImages = append(processedImages, img)
-			continue
+			return img, "analysis_failed"
 		}
 
 		// Update image info with analysis results
 		img.Summary = summary
 		img.Tags = tags
-		processedImages = append(processedImages, img)
-
 		log.Printf("Successfully analyzed image %s (summary: %d chars, tags: %d)",
 			img.URL, len(summary), len(tags))
+		return img, ""
 	}
 
-	return processedImages
+	log.Printf("Context cancelled while waiting for Ollama slot for image %s: %v", img.URL, err)
+	return img, "analysis_timeout"
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // resolveURL resolves a potentially relative URL against a base URL
@@ -615,11 +823,27 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 	textContent := extractText(doc)
 
 	// Use Ollama to score the content (with fallback to rule-based scoring)
-	score, reason, categories, maliciousIndicators, err := s.ollamaClient.ScoreContent(ctx, targetURL, title, textContent)
-	aiUsed := true
-	if err != nil {
-		// Fallback to rule-based scoring when Ollama is unavailable
-		log.Printf("Ollama scoring failed, using rule-based fallback: %v", err)
+	var score float64
+	var reason string
+	var categories []string
+	var maliciousIndicators []string
+	var aiUsed bool
+
+	if err := s.acquireOllamaSlot(ctx); err == nil {
+		var err error
+		score, reason, categories, maliciousIndicators, err = s.ollamaClient.ScoreContent(ctx, targetURL, title, textContent)
+		s.releaseOllamaSlot()
+		if err != nil {
+			// Fallback to rule-based scoring when Ollama fails
+			log.Printf("Ollama scoring failed, using rule-based fallback: %v", err)
+			score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, textContent)
+			aiUsed = false
+		} else {
+			aiUsed = true
+		}
+	} else {
+		// Context cancelled, use rule-based fallback
+		log.Printf("Context cancelled while waiting for Ollama slot for scoring: %v", err)
 		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, textContent)
 		aiUsed = false
 	}
@@ -653,22 +877,22 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 
 	// Check for blocked content types (social media, gambling, adult, drugs, etc.)
 	blockedDomains := map[string]string{
-		"facebook.com":    "social_media",
-		"twitter.com":     "social_media",
-		"x.com":           "social_media",
-		"instagram.com":   "social_media",
-		"tiktok.com":      "social_media",
+		"facebook.com":    "social-media",
+		"twitter.com":     "social-media",
+		"x.com":           "social-media",
+		"instagram.com":   "social-media",
+		"tiktok.com":      "social-media",
 		"reddit.com":      "forum",
-		"linkedin.com":    "social_media",
-		"pinterest.com":   "social_media",
-		"snapchat.com":    "social_media",
+		"linkedin.com":    "social-media",
+		"pinterest.com":   "social-media",
+		"snapchat.com":    "social-media",
 		"bet":             "gambling",
 		"casino":          "gambling",
 		"poker":           "gambling",
 		"betting":         "gambling",
-		"xxx":             "adult_content",
-		"porn":            "adult_content",
-		"adult":           "adult_content",
+		"xxx":             "adult-content",
+		"porn":            "adult-content",
+		"adult":           "adult-content",
 		"cannabis":        "drugs",
 		"weed":            "drugs",
 		"ebay.com":        "marketplace",
@@ -679,7 +903,7 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 	for domain, category := range blockedDomains {
 		if strings.Contains(urlLower, domain) {
 			score = 0.1
-			categories = append(categories, category, "low_quality")
+			categories = append(categories, category, "low-quality")
 			reasons = append(reasons, "Blocked content type detected: "+category)
 			maliciousIndicators = append(maliciousIndicators, category)
 			reason = strings.Join(reasons, "; ")
@@ -694,7 +918,7 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 	if contentLength < 100 {
 		score -= 0.3
 		reasons = append(reasons, "Very short content")
-		categories = append(categories, "low_quality")
+		categories = append(categories, "low-quality")
 	} else if contentLength < 500 {
 		score -= 0.1
 		reasons = append(reasons, "Short content")
@@ -706,7 +930,7 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 
 	if wordCount < 20 {
 		score -= 0.2
-		categories = append(categories, "minimal_content")
+		categories = append(categories, "minimal-content")
 	}
 
 	// Check for spam indicators
@@ -776,5 +1000,39 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 		maliciousIndicators = []string{}
 	}
 
+	// Normalize all categories
+	for i, category := range categories {
+		categories[i] = normalizeTag(category)
+	}
+
+	// Normalize all malicious indicators
+	for i, indicator := range maliciousIndicators {
+		maliciousIndicators[i] = normalizeTag(indicator)
+	}
+
 	return score, reason, categories, maliciousIndicators
+}
+
+// normalizeTag normalizes a tag according to the tagging rules:
+// - Converts to lowercase
+// - Replaces spaces and underscores with hyphens
+// - Removes multiple consecutive hyphens
+// - Trims leading/trailing hyphens and whitespace
+func normalizeTag(tag string) string {
+	// Convert to lowercase
+	tag = strings.ToLower(tag)
+
+	// Replace spaces and underscores with hyphens
+	tag = strings.ReplaceAll(tag, " ", "-")
+	tag = strings.ReplaceAll(tag, "_", "-")
+
+	// Remove multiple consecutive hyphens
+	for strings.Contains(tag, "--") {
+		tag = strings.ReplaceAll(tag, "--", "-")
+	}
+
+	// Trim leading/trailing hyphens and whitespace
+	tag = strings.Trim(tag, "- \t\n\r")
+
+	return tag
 }
