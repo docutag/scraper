@@ -580,8 +580,8 @@ func TestScoreLinkContentLowScore(t *testing.T) {
 		t.Error("Expected IsRecommended to be false for score 0.2 with threshold 0.5")
 	}
 
-	if len(score.Categories) != 1 || score.Categories[0] != "social_media" {
-		t.Errorf("Categories = %v, want ['social_media']", score.Categories)
+	if len(score.Categories) != 1 || score.Categories[0] != "social-media" {
+		t.Errorf("Categories = %v, want ['social-media']", score.Categories)
 	}
 }
 
@@ -896,12 +896,12 @@ func TestScoreContentFallbackSocialMedia(t *testing.T) {
 		t.Errorf("Expected score 0.1 for social media, got %.2f", score)
 	}
 
-	if !containsString(categories, "social_media") {
-		t.Error("Expected 'social_media' category")
+	if !containsString(categories, "social-media") {
+		t.Error("Expected 'social-media' category")
 	}
 
-	if !containsString(categories, "low_quality") {
-		t.Error("Expected 'low_quality' category")
+	if !containsString(categories, "low-quality") {
+		t.Error("Expected 'low-quality' category")
 	}
 
 	if !strings.Contains(reason, "Blocked content type") {
@@ -925,7 +925,7 @@ func TestScoreContentFallbackQualityDomain(t *testing.T) {
 		t.Errorf("Expected high score for Wikipedia, got %.2f", score)
 	}
 
-	if !containsString(categories, "reference") || !containsString(categories, "trusted_source") {
+	if !containsString(categories, "reference") || !containsString(categories, "trusted-source") {
 		t.Errorf("Expected quality categories, got: %v", categories)
 	}
 
@@ -946,8 +946,8 @@ func TestScoreContentFallbackShortContent(t *testing.T) {
 		t.Errorf("Expected low score for short content, got %.2f", score)
 	}
 
-	if !containsString(categories, "low_quality") {
-		t.Errorf("Expected 'low_quality' category, got: %v", categories)
+	if !containsString(categories, "low-quality") {
+		t.Errorf("Expected 'low-quality' category, got: %v", categories)
 	}
 
 	if !strings.Contains(reason, "short") {
@@ -976,8 +976,8 @@ func TestScoreContentFallbackSpam(t *testing.T) {
 		t.Errorf("Expected reason to mention spam, got: %s", reason)
 	}
 
-	if !containsString(indicators, "spam_keywords") {
-		t.Errorf("Expected spam_keywords in malicious indicators, got: %v", indicators)
+	if !containsString(indicators, "spam-keywords") {
+		t.Errorf("Expected spam-keywords in malicious indicators, got: %v", indicators)
 	}
 }
 
@@ -1081,4 +1081,261 @@ func containsString(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func TestNormalizeTag(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "lowercase conversion",
+			input:    "Machine Learning",
+			expected: "machine-learning",
+		},
+		{
+			name:     "underscore to hyphen",
+			input:    "social_media",
+			expected: "social-media",
+		},
+		{
+			name:     "multiple spaces",
+			input:    "New  York  City",
+			expected: "new-york-city",
+		},
+		{
+			name:     "mixed spaces and underscores",
+			input:    "low_quality content",
+			expected: "low-quality-content",
+		},
+		{
+			name:     "leading and trailing spaces",
+			input:    "  spam  ",
+			expected: "spam",
+		},
+		{
+			name:     "multiple consecutive hyphens",
+			input:    "foo--bar---baz",
+			expected: "foo-bar-baz",
+		},
+		{
+			name:     "already normalized",
+			input:    "technical",
+			expected: "technical",
+		},
+		{
+			name:     "single word uppercase",
+			input:    "EDUCATIONAL",
+			expected: "educational",
+		},
+		{
+			name:     "malicious indicator",
+			input:    "spam_keywords",
+			expected: "spam-keywords",
+		},
+		{
+			name:     "trusted source",
+			input:    "trusted_source",
+			expected: "trusted-source",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := normalizeTag(tt.input)
+			if result != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestShouldSkipImage(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageURL string
+		expected bool
+	}{
+		// Should skip
+		{
+			name:     "placeholder in URL",
+			imageURL: "https://example.com/placeholder.png",
+			expected: true,
+		},
+		{
+			name:     "temp in URL",
+			imageURL: "https://example.com/temp-image.jpg",
+			expected: true,
+		},
+		{
+			name:     "temporary in URL",
+			imageURL: "https://example.com/temporary_file.png",
+			expected: true,
+		},
+		{
+			name:     "icon in URL",
+			imageURL: "https://example.com/facebook-icon.svg",
+			expected: true,
+		},
+		{
+			name:     "logo in URL",
+			imageURL: "https://example.com/company-logo.png",
+			expected: true,
+		},
+		{
+			name:     "button in URL",
+			imageURL: "https://example.com/share-button.png",
+			expected: true,
+		},
+		{
+			name:     "sprite in URL",
+			imageURL: "https://example.com/ui-sprite.png",
+			expected: true,
+		},
+		{
+			name:     "default avatar in URL",
+			imageURL: "https://example.com/avatar-default.jpg",
+			expected: true,
+		},
+		{
+			name:     "tracking pixel in URL",
+			imageURL: "https://example.com/pixel.gif",
+			expected: true,
+		},
+		{
+			name:     "1x1 tracking pixel",
+			imageURL: "https://example.com/track-1x1.png",
+			expected: true,
+		},
+		{
+			name:     "spacer image",
+			imageURL: "https://example.com/spacer.gif",
+			expected: true,
+		},
+		{
+			name:     "loader animation",
+			imageURL: "https://example.com/loader.svg",
+			expected: true,
+		},
+		{
+			name:     "advertisement banner",
+			imageURL: "https://example.com/ad-banner.jpg",
+			expected: true,
+		},
+		// Should not skip
+		{
+			name:     "regular image",
+			imageURL: "https://example.com/article-photo.jpg",
+			expected: false,
+		},
+		{
+			name:     "product image",
+			imageURL: "https://example.com/products/widget-2000.png",
+			expected: false,
+		},
+		{
+			name:     "case sensitive check - uppercase PLACEHOLDER",
+			imageURL: "https://example.com/PLACEHOLDER.jpg",
+			expected: true,
+		},
+		{
+			name:     "profile picture",
+			imageURL: "https://example.com/users/john-smith.jpg",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := shouldSkipImage(tt.imageURL)
+			if result != tt.expected {
+				t.Errorf("shouldSkipImage(%q) = %v, expected %v", tt.imageURL, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestImageFiltering(t *testing.T) {
+	// Create mock Ollama server
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mock image analysis response
+		resp := models.OllamaResponse{
+			Response: `{"summary": "Test image", "tags": ["test"]}`,
+			Done:     true,
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer ollamaServer.Close()
+
+	// Create scraper with image analysis enabled
+	config := DefaultConfig()
+	config.OllamaBaseURL = ollamaServer.URL
+	config.EnableImageAnalysis = true
+	s := New(config)
+
+	// Create test images - mix of valid and junk images
+	images := []models.ImageInfo{
+		{URL: "https://example.com/article-photo.jpg", AltText: "Article photo"},
+		{URL: "https://example.com/placeholder.png", AltText: "Placeholder"},
+		{URL: "https://example.com/temp-image.jpg", AltText: "Temp"},
+		{URL: "https://example.com/product.jpg", AltText: "Product"},
+		{URL: "https://example.com/icon.svg", AltText: "Icon"},
+		{URL: "https://example.com/logo.png", AltText: "Logo"},
+		{URL: "https://example.com/hero-image.jpg", AltText: "Hero"},
+	}
+
+	ctx := context.Background()
+	processedImages, warnings := s.processImages(ctx, images)
+
+	// Should filter out: placeholder, temp, icon, logo (4 images)
+	// Should keep: article-photo, product, hero-image (3 images)
+	expectedCount := 3
+	if len(processedImages) != expectedCount {
+		t.Errorf("Expected %d images after filtering, got %d", expectedCount, len(processedImages))
+	}
+
+	// Check that the warning was added
+	hasSkipWarning := false
+	for _, warning := range warnings {
+		if contains(warning, "Skipped") && contains(warning, "placeholder/temp/UI component") {
+			hasSkipWarning = true
+			break
+		}
+	}
+	if !hasSkipWarning {
+		t.Error("Expected warning about skipped images")
+	}
+
+	// Verify the correct images were kept
+	keptURLs := make(map[string]bool)
+	for _, img := range processedImages {
+		keptURLs[img.URL] = true
+	}
+
+	expectedKept := []string{
+		"https://example.com/article-photo.jpg",
+		"https://example.com/product.jpg",
+		"https://example.com/hero-image.jpg",
+	}
+
+	for _, url := range expectedKept {
+		if !keptURLs[url] {
+			t.Errorf("Expected image %q to be kept, but it was filtered out", url)
+		}
+	}
+
+	// Verify the junk images were filtered out
+	unexpectedKept := []string{
+		"https://example.com/placeholder.png",
+		"https://example.com/temp-image.jpg",
+		"https://example.com/icon.svg",
+		"https://example.com/logo.png",
+	}
+
+	for _, url := range unexpectedKept {
+		if keptURLs[url] {
+			t.Errorf("Expected image %q to be filtered out, but it was kept", url)
+		}
+	}
 }

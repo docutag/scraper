@@ -355,3 +355,88 @@ func TestHandleHealth(t *testing.T) {
 		t.Errorf("Status = %q, want %q", resp["status"], "healthy")
 	}
 }
+
+// TestBatchScrapeWithWarnings tests that warnings are included in batch responses
+func TestBatchScrapeWithWarnings(t *testing.T) {
+	// Create mock Ollama server that fails
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ollamaServer.Close()
+
+	// Create mock web server
+	webServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		html := `<!DOCTYPE html><html><head><title>Test</title></head><body><p>Test content</p></body></html>`
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(html))
+	}))
+	defer webServer.Close()
+
+	// Create temp database
+	tempDB := t.TempDir() + "/test.db"
+
+	config := Config{
+		Addr: ":0",
+		DBConfig: db.Config{
+			Driver: "sqlite",
+			DSN:    tempDB,
+		},
+		ScraperConfig: scraper.Config{
+			HTTPTimeout:         10 * time.Second,
+			OllamaBaseURL:       ollamaServer.URL,
+			OllamaModel:         "test-model",
+			EnableImageAnalysis: false,
+			MaxImageSizeBytes:   10 * 1024 * 1024,
+			ImageTimeout:        5 * time.Second,
+			LinkScoreThreshold:  0.5,
+		},
+		CORSEnabled: false,
+	}
+
+	server, err := NewServer(config)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer server.db.Close()
+
+	// Create batch scrape request
+	reqBody := BatchScrapeRequest{
+		URLs:  []string{webServer.URL},
+		Force: true,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/scrape/batch", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	server.handleBatchScrape(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Status code = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp BatchScrapeResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	// Verify response structure
+	if len(resp.Results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(resp.Results))
+	}
+
+	result := resp.Results[0]
+
+	// Verify warnings are present when Ollama fails
+	if len(result.Warnings) == 0 {
+		t.Error("Expected warnings in batch result when Ollama fails, got none")
+	}
+
+	// Verify the scraped data also has warnings
+	if result.Data != nil && len(result.Data.Warnings) == 0 {
+		t.Error("Expected warnings in scraped data when Ollama fails, got none")
+	}
+
+	t.Logf("✓ Batch result includes %d warnings: %v", len(result.Warnings), result.Warnings)
+}
