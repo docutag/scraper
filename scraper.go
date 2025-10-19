@@ -176,9 +176,13 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	var maliciousIndicators []string
 	var aiUsed bool
 
-	// Check for audio/video content first (always score low regardless of Ollama)
-	if isAudioVideoURL(targetURL) {
-		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
+	// Check for low-quality patterns first (before Ollama) to avoid unnecessary AI calls
+	shouldSkipAI, earlyScore, earlyReason, earlyCategories, earlyIndicators := checkForLowQualityPatterns(targetURL, title)
+	if shouldSkipAI {
+		score = earlyScore
+		reason = earlyReason
+		categories = earlyCategories
+		maliciousIndicators = earlyIndicators
 		aiUsed = false
 	} else if err := s.acquireOllamaSlot(ctx); err == nil {
 		var err error
@@ -441,11 +445,31 @@ func (s *Scraper) extractLinksWithOllama(ctx context.Context, n *html.Node, base
 		return allLinks
 	}
 
-	// Try to sanitize using Ollama directly
-	linksJSON, err := json.Marshal(allLinks)
+	// Pre-filter links using pattern matching before AI
+	filteredLinks, filteredCount := filterLowQualityLinks(allLinks)
+	log.Printf("Link extraction: found %d links, filtered out %d low-quality links, %d remaining",
+		len(allLinks), filteredCount, len(filteredLinks))
+
+	// If we have no links remaining, return early
+	if len(filteredLinks) == 0 {
+		return filteredLinks
+	}
+
+	// Skip AI only if:
+	// 1. We have very few links (≤3) after filtering, AND
+	// 2. We filtered out at least 50% of the original links (meaning our patterns worked well)
+	// This ensures we still use AI when needed for intelligent filtering
+	if len(filteredLinks) <= 3 && filteredCount > 0 && float64(filteredCount)/float64(len(allLinks)) >= 0.5 {
+		log.Printf("Skipping AI for link extraction: %d clean links after filtering %d/%d links",
+			len(filteredLinks), filteredCount, len(allLinks))
+		return filteredLinks
+	}
+
+	// For pages with many links (like news sites), use AI to further refine
+	linksJSON, err := json.Marshal(filteredLinks)
 	if err != nil {
-		// If marshaling fails, fall back to returning all links
-		return allLinks
+		// If marshaling fails, fall back to returning filtered links
+		return filteredLinks
 	}
 
 	prompt := fmt.Sprintf(`You are a link filtering assistant. Given a list of URLs extracted from a webpage, identify and return ONLY the links that point to substantive content (articles, blog posts, reports, etc.).
@@ -488,21 +512,22 @@ Format: ["url1", "url2", "url3"]`,
 		string(linksJSON))
 
 	// Use Ollama with semaphore protection
-	sanitizedLinks := allLinks // Default to all links
+	sanitizedLinks := filteredLinks // Default to filtered links
 	if err := s.acquireOllamaSlot(ctx); err == nil {
 		response, err := s.ollamaClient.Generate(ctx, prompt)
 		s.releaseOllamaSlot()
 		if err != nil {
-			// If Ollama fails, fall back to returning all links
-			log.Printf("Ollama link sanitization failed, returning all links: %v", err)
+			// If Ollama fails, fall back to returning filtered links
+			log.Printf("Ollama link sanitization failed, returning filtered links: %v", err)
 		} else {
 			// Parse JSON response
 			var parsedLinks []string
 			if err := json.Unmarshal([]byte(response), &parsedLinks); err != nil {
-				// If parsing fails, fall back to returning all links
-				log.Printf("Failed to parse Ollama link response, returning all links: %v", err)
+				// If parsing fails, fall back to returning filtered links
+				log.Printf("Failed to parse Ollama link response, returning filtered links: %v", err)
 			} else if parsedLinks != nil {
 				sanitizedLinks = parsedLinks
+				log.Printf("AI refined links from %d to %d", len(filteredLinks), len(sanitizedLinks))
 			}
 		}
 	} else {
@@ -932,9 +957,13 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 	var maliciousIndicators []string
 	var aiUsed bool
 
-	// Check for audio/video content first (always score low regardless of Ollama)
-	if isAudioVideoURL(targetURL) {
-		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, textContent)
+	// Check for low-quality patterns first (before Ollama) to avoid unnecessary AI calls
+	shouldSkipAI, earlyScore, earlyReason, earlyCategories, earlyIndicators := checkForLowQualityPatterns(targetURL, title)
+	if shouldSkipAI {
+		score = earlyScore
+		reason = earlyReason
+		categories = earlyCategories
+		maliciousIndicators = earlyIndicators
 		aiUsed = false
 	} else if err := s.acquireOllamaSlot(ctx); err == nil {
 		var err error
@@ -969,6 +998,196 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 	}
 
 	return linkScore, nil
+}
+
+// checkForLowQualityPatterns performs early detection of low-quality URLs that don't require AI analysis
+// Returns (shouldSkipAI, score, reason, categories, maliciousIndicators)
+func checkForLowQualityPatterns(targetURL, title string) (bool, float64, string, []string, []string) {
+	urlLower := strings.ToLower(targetURL)
+	titleLower := strings.ToLower(title)
+
+	// Check for audio/video content
+	if isAudioVideoURL(targetURL) {
+		categories := []string{"media", "low-quality"}
+		maliciousIndicators := []string{}
+
+		if strings.Contains(urlLower, ".mp3") || strings.Contains(urlLower, ".wav") ||
+			strings.Contains(urlLower, ".ogg") || strings.Contains(urlLower, ".flac") ||
+			strings.Contains(urlLower, ".aac") || strings.Contains(urlLower, ".m4a") ||
+			strings.Contains(urlLower, ".mp4") || strings.Contains(urlLower, ".avi") ||
+			strings.Contains(urlLower, ".mkv") || strings.Contains(urlLower, ".mov") ||
+			strings.Contains(urlLower, ".webm") || strings.Contains(urlLower, ".wmv") ||
+			strings.Contains(urlLower, ".flv") || strings.Contains(urlLower, ".m4v") ||
+			strings.Contains(urlLower, ".mpeg") || strings.Contains(urlLower, ".mpg") ||
+			strings.Contains(urlLower, ".wma") || strings.Contains(urlLower, ".opus") ||
+			strings.Contains(urlLower, ".aiff") {
+			categories = append(categories, "audio-video")
+			maliciousIndicators = append(maliciousIndicators, "media-file")
+			return true, 0.15, "Audio/video file detected", categories, maliciousIndicators
+		}
+		categories = append(categories, "streaming")
+		maliciousIndicators = append(maliciousIndicators, "streaming-platform")
+		return true, 0.15, "Streaming platform detected", categories, maliciousIndicators
+	}
+
+	// Check for subscription/settings/preferences/account pages
+	undesirablePatterns := []struct {
+		patterns   []string
+		category   string
+		reason     string
+		indicator  string
+	}{
+		{
+			patterns:  []string{"/subscribe", "/subscription", "/subscriptions", "/pricing", "/plan", "/plans", "/premium", "/upgrade"},
+			category:  "subscription",
+			reason:    "Subscription/pricing page detected",
+			indicator: "subscription-page",
+		},
+		{
+			patterns:  []string{"/setting", "/settings", "/preference", "/preferences", "/config", "/configuration", "/configurations"},
+			category:  "settings",
+			reason:    "Settings/preferences page detected",
+			indicator: "settings-page",
+		},
+		{
+			patterns:  []string{"/account", "/accounts", "/profile", "/profiles", "/login", "/signin", "/signup", "/sign-up", "/register", "/auth"},
+			category:  "account",
+			reason:    "Account/login page detected",
+			indicator: "account-page",
+		},
+		{
+			patterns:  []string{"/checkout", "/cart", "/carts", "/basket", "/baskets", "/payment", "/payments"},
+			category:  "commerce",
+			reason:    "Shopping/payment page detected",
+			indicator: "commerce-page",
+		},
+		{
+			patterns:  []string{"/unsubscribe", "/opt-out", "/optout", "/opt_out"},
+			category:  "unsubscribe",
+			reason:    "Unsubscribe page detected",
+			indicator: "unsubscribe-page",
+		},
+		{
+			patterns:  []string{"/about", "/about-us", "/aboutus", "/who-we-are", "/our-story", "/our-team", "/team"},
+			category:  "about",
+			reason:    "About/team page detected",
+			indicator: "about-page",
+		},
+		{
+			patterns:  []string{"/contact", "/contact-us", "/contactus", "/get-in-touch", "/reach-us", "/support"},
+			category:  "contact",
+			reason:    "Contact page detected",
+			indicator: "contact-page",
+		},
+	}
+
+	for _, pattern := range undesirablePatterns {
+		for _, p := range pattern.patterns {
+			if strings.Contains(urlLower, p) || strings.Contains(titleLower, p) {
+				categories := []string{pattern.category, "low-quality", "utility-page"}
+				maliciousIndicators := []string{pattern.indicator}
+				return true, 0.1, pattern.reason, categories, maliciousIndicators
+			}
+		}
+	}
+
+	// No early pattern detected
+	return false, 0.0, "", nil, nil
+}
+
+// filterLowQualityLinks filters out low-quality URLs from a list using pattern matching
+// Returns the filtered list of URLs and the count of filtered links
+func filterLowQualityLinks(urls []string) ([]string, int) {
+	if len(urls) == 0 {
+		return urls, 0
+	}
+
+	filtered := make([]string, 0, len(urls))
+	filteredCount := 0
+
+	// Define patterns to filter out
+	lowQualityPatterns := []string{
+		// Subscription and commerce
+		"/subscribe", "/subscription", "/subscriptions", "/pricing", "/plan", "/plans", "/premium", "/upgrade",
+		"/checkout", "/cart", "/carts", "/basket", "/baskets", "/payment", "/payments",
+
+		// Account and authentication
+		"/account", "/accounts", "/profile", "/profiles", "/login", "/signin", "/signup", "/sign-up", "/register", "/auth",
+		"/setting", "/settings", "/preference", "/preferences", "/config", "/configuration", "/configurations",
+
+		// Unsubscribe and opt-out
+		"/unsubscribe", "/opt-out", "/optout", "/opt_out",
+
+		// About and contact pages
+		"/about", "/about-us", "/aboutus", "/who-we-are", "/our-story", "/our-team", "/team",
+		"/contact", "/contact-us", "/contactus", "/get-in-touch", "/reach-us", "/support",
+
+		// Navigation and utility
+		"/privacy", "/terms", "/cookie", "/legal", "/disclaimer", "/faq", "/help",
+		"/sitemap", "/search", "/rss", "/feed", "/newsletter", "/jobs", "/careers",
+		"/press", "/media-kit", "/advertise", "/advertising",
+
+		// Social media and sharing
+		"/share", "/tweet", "/facebook", "/twitter", "/linkedin", "/pinterest",
+
+		// Fragments and anchors (often just navigation)
+		"#comments", "#respond", "#reply", "#share", "#footer", "#header", "#nav",
+	}
+
+	// Media file extensions
+	mediaExtensions := []string{
+		".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a", ".wma", ".opus", ".aiff",
+		".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpeg", ".mpg",
+		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".tar", ".gz",
+	}
+
+	// Streaming platforms to filter out
+	streamingPlatforms := []string{
+		"youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+		"twitch.tv", "soundcloud.com", "spotify.com", "music.apple.com",
+		"tidal.com", "deezer.com", "pandora.com", "music.youtube.com",
+	}
+
+	for _, url := range urls {
+		urlLower := strings.ToLower(url)
+		shouldFilter := false
+
+		// Check for media files
+		for _, ext := range mediaExtensions {
+			if strings.HasSuffix(urlLower, ext) || strings.Contains(urlLower, ext+"?") {
+				shouldFilter = true
+				break
+			}
+		}
+
+		if !shouldFilter {
+			// Check for streaming platforms
+			for _, platform := range streamingPlatforms {
+				if strings.Contains(urlLower, platform) {
+					shouldFilter = true
+					break
+				}
+			}
+		}
+
+		if !shouldFilter {
+			// Check for low-quality URL patterns
+			for _, pattern := range lowQualityPatterns {
+				if strings.Contains(urlLower, pattern) {
+					shouldFilter = true
+					break
+				}
+			}
+		}
+
+		if !shouldFilter {
+			filtered = append(filtered, url)
+		} else {
+			filteredCount++
+		}
+	}
+
+	return filtered, filteredCount
 }
 
 // isAudioVideoURL checks if a URL points to audio/video content or streaming platforms
@@ -1006,6 +1225,8 @@ func isAudioVideoURL(targetURL string) bool {
 }
 
 // scoreContentFallback provides rule-based content scoring when Ollama is unavailable
+// This function is only called after checkForLowQualityPatterns() has already passed,
+// so we don't need to re-check for audio/video, subscription pages, etc.
 func scoreContentFallback(targetURL, title, content string) (score float64, reason string, categories []string, maliciousIndicators []string) {
 	score = 0.5 // Start with neutral score
 	categories = []string{}
@@ -1015,32 +1236,6 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 	urlLower := strings.ToLower(targetURL)
 	titleLower := strings.ToLower(title)
 	contentLower := strings.ToLower(content)
-
-	// Check for audio/video content using centralized detection
-	if isAudioVideoURL(targetURL) {
-		score = 0.15
-		// Determine if it's a file or streaming platform
-		if strings.Contains(urlLower, ".mp3") || strings.Contains(urlLower, ".wav") ||
-			strings.Contains(urlLower, ".ogg") || strings.Contains(urlLower, ".flac") ||
-			strings.Contains(urlLower, ".aac") || strings.Contains(urlLower, ".m4a") ||
-			strings.Contains(urlLower, ".mp4") || strings.Contains(urlLower, ".avi") ||
-			strings.Contains(urlLower, ".mkv") || strings.Contains(urlLower, ".mov") ||
-			strings.Contains(urlLower, ".webm") || strings.Contains(urlLower, ".wmv") ||
-			strings.Contains(urlLower, ".flv") || strings.Contains(urlLower, ".m4v") ||
-			strings.Contains(urlLower, ".mpeg") || strings.Contains(urlLower, ".mpg") ||
-			strings.Contains(urlLower, ".wma") || strings.Contains(urlLower, ".opus") ||
-			strings.Contains(urlLower, ".aiff") {
-			categories = append(categories, "media", "audio-video", "low-quality")
-			reasons = append(reasons, "Audio/video file detected")
-			maliciousIndicators = append(maliciousIndicators, "media_file")
-		} else {
-			categories = append(categories, "media", "streaming", "low-quality")
-			reasons = append(reasons, "Streaming platform detected")
-			maliciousIndicators = append(maliciousIndicators, "streaming_platform")
-		}
-		reason = strings.Join(reasons, "; ")
-		return
-	}
 
 	// Check for blocked content types (social media, gambling, adult, drugs, etc.)
 	blockedDomains := map[string]string{

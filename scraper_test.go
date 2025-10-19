@@ -1024,58 +1024,55 @@ func TestScoreContentFallbackGambling(t *testing.T) {
 	}
 }
 
-func TestScoreContentFallbackAudioVideo(t *testing.T) {
+func TestCheckForLowQualityPatternsAudioVideo(t *testing.T) {
 	tests := []struct {
-		name     string
-		url      string
-		title    string
-		content  string
+		name         string
+		url          string
+		title        string
 		wantCategory string
 	}{
 		{
 			name:         "MP3 audio file",
 			url:          "https://example.com/music/song.mp3",
 			title:        "My Song",
-			content:      "Audio file",
 			wantCategory: "audio-video",
 		},
 		{
 			name:         "MP4 video file",
 			url:          "https://example.com/videos/movie.mp4",
 			title:        "Movie",
-			content:      "Video file",
 			wantCategory: "audio-video",
 		},
 		{
 			name:         "YouTube link",
 			url:          "https://www.youtube.com/watch?v=abc123",
 			title:        "YouTube Video",
-			content:      "Watch this video",
 			wantCategory: "streaming",
 		},
 		{
 			name:         "Spotify link",
 			url:          "https://open.spotify.com/track/xyz789",
 			title:        "Spotify Track",
-			content:      "Listen to this track",
 			wantCategory: "streaming",
 		},
 		{
 			name:         "Audio file with query params",
 			url:          "https://cdn.example.com/audio.mp3?token=abc",
 			title:        "Audio",
-			content:      "Audio content",
 			wantCategory: "audio-video",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			score, reason, categories, indicators := scoreContentFallback(
+			shouldSkip, score, reason, categories, indicators := checkForLowQualityPatterns(
 				tt.url,
 				tt.title,
-				tt.content,
 			)
+
+			if !shouldSkip {
+				t.Errorf("Expected shouldSkip=true for %s", tt.name)
+			}
 
 			if score != 0.15 {
 				t.Errorf("Expected score 0.15 for %s, got %.2f", tt.name, score)
@@ -1091,6 +1088,103 @@ func TestScoreContentFallbackAudioVideo(t *testing.T) {
 
 			if !containsString(categories, "low-quality") {
 				t.Errorf("Expected 'low-quality' category for %s, got: %v", tt.name, categories)
+			}
+
+			if len(indicators) == 0 {
+				t.Errorf("Expected malicious indicators for %s", tt.name)
+			}
+
+			if reason == "" {
+				t.Errorf("Expected reason for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestCheckForLowQualityPatternsUtilityPages(t *testing.T) {
+	tests := []struct {
+		name         string
+		url          string
+		title        string
+		wantCategory string
+		wantScore    float64
+	}{
+		{
+			name:         "Subscription page",
+			url:          "https://example.com/subscribe",
+			title:        "Subscribe Now",
+			wantCategory: "subscription",
+			wantScore:    0.1,
+		},
+		{
+			name:         "Pricing page",
+			url:          "https://example.com/pricing",
+			title:        "Our Pricing",
+			wantCategory: "subscription",
+			wantScore:    0.1,
+		},
+		{
+			name:         "Settings page",
+			url:          "https://example.com/settings",
+			title:        "Account Settings",
+			wantCategory: "settings",
+			wantScore:    0.1,
+		},
+		{
+			name:         "Preferences page (singular)",
+			url:          "https://example.com/preference",
+			title:        "Preferences",
+			wantCategory: "settings",
+			wantScore:    0.1,
+		},
+		{
+			name:         "Login page",
+			url:          "https://example.com/login",
+			title:        "Sign In",
+			wantCategory: "account",
+			wantScore:    0.1,
+		},
+		{
+			name:         "Shopping cart",
+			url:          "https://example.com/cart",
+			title:        "Your Cart",
+			wantCategory: "commerce",
+			wantScore:    0.1,
+		},
+		{
+			name:         "Unsubscribe page",
+			url:          "https://example.com/unsubscribe",
+			title:        "Unsubscribe",
+			wantCategory: "unsubscribe",
+			wantScore:    0.1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shouldSkip, score, reason, categories, indicators := checkForLowQualityPatterns(
+				tt.url,
+				tt.title,
+			)
+
+			if !shouldSkip {
+				t.Errorf("Expected shouldSkip=true for %s", tt.name)
+			}
+
+			if score != tt.wantScore {
+				t.Errorf("Expected score %.2f for %s, got %.2f", tt.wantScore, tt.name, score)
+			}
+
+			if !containsString(categories, tt.wantCategory) {
+				t.Errorf("Expected '%s' category for %s, got: %v", tt.wantCategory, tt.name, categories)
+			}
+
+			if !containsString(categories, "low-quality") {
+				t.Errorf("Expected 'low-quality' category for %s, got: %v", tt.name, categories)
+			}
+
+			if !containsString(categories, "utility-page") {
+				t.Errorf("Expected 'utility-page' category for %s, got: %v", tt.name, categories)
 			}
 
 			if len(indicators) == 0 {
