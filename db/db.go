@@ -124,9 +124,18 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 			return fmt.Errorf("failed to marshal image tags: %w", err)
 		}
 
+		// Serialize EXIF data to JSON if present
+		var exifJSON []byte
+		if image.EXIF != nil {
+			exifJSON, err = json.Marshal(image.EXIF)
+			if err != nil {
+				return fmt.Errorf("failed to marshal EXIF: %w", err)
+			}
+		}
+
 		imageQuery := `
-			INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 
 		_, err = tx.Exec(
@@ -138,6 +147,11 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 			image.Summary,
 			string(tagsJSON),
 			image.Base64Data,
+			image.Width,
+			image.Height,
+			image.FileSizeBytes,
+			image.ContentType,
+			string(exifJSON),
 			time.Now(),
 			time.Now(),
 		)
@@ -280,9 +294,18 @@ func (db *DB) SaveImage(image *models.ImageInfo, scrapeID string) error {
 		return fmt.Errorf("failed to marshal tags: %w", err)
 	}
 
+	// Serialize EXIF data to JSON if present
+	var exifJSON []byte
+	if image.EXIF != nil {
+		exifJSON, err = json.Marshal(image.EXIF)
+		if err != nil {
+			return fmt.Errorf("failed to marshal EXIF: %w", err)
+		}
+	}
+
 	query := `
-		INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err = db.conn.Exec(
@@ -294,6 +317,11 @@ func (db *DB) SaveImage(image *models.ImageInfo, scrapeID string) error {
 		image.Summary,
 		string(tagsJSON),
 		image.Base64Data,
+		image.Width,
+		image.Height,
+		image.FileSizeBytes,
+		image.ContentType,
+		string(exifJSON),
 		time.Now(),
 		time.Now(),
 	)
@@ -315,10 +343,15 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 		tagsJSON          string
 		base64Data        string
 		tombstoneDatetime sql.NullTime
+		width             sql.NullInt64
+		height            sql.NullInt64
+		fileSizeBytes     sql.NullInt64
+		contentType       sql.NullString
+		exifJSON          sql.NullString
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime FROM images WHERE id = ?"
-	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime)
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images WHERE id = ?"
+	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -345,6 +378,25 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 	if tombstoneDatetime.Valid {
 		image.TombstoneDatetime = &tombstoneDatetime.Time
 	}
+	if width.Valid {
+		image.Width = int(width.Int64)
+	}
+	if height.Valid {
+		image.Height = int(height.Int64)
+	}
+	if fileSizeBytes.Valid {
+		image.FileSizeBytes = fileSizeBytes.Int64
+	}
+	if contentType.Valid {
+		image.ContentType = contentType.String
+	}
+	if exifJSON.Valid && exifJSON.String != "" && exifJSON.String != "null" {
+		var exif models.EXIFData
+		if err := json.Unmarshal([]byte(exifJSON.String), &exif); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal EXIF: %w", err)
+		}
+		image.EXIF = &exif
+	}
 
 	return image, nil
 }
@@ -352,16 +404,21 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 // GetImageByURL retrieves an image by its source URL
 func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
 	var (
-		imageID     string
-		imageURL    string
-		altText     string
-		summary     string
-		tagsJSON    string
-		base64Data  string
+		imageID       string
+		imageURL      string
+		altText       string
+		summary       string
+		tagsJSON      string
+		base64Data    string
+		width         sql.NullInt64
+		height        sql.NullInt64
+		fileSizeBytes sql.NullInt64
+		contentType   sql.NullString
+		exifJSON      sql.NullString
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, base64_data FROM images WHERE url = ? LIMIT 1"
-	err := db.conn.QueryRow(query, url).Scan(&imageID, &imageURL, &altText, &summary, &tagsJSON, &base64Data)
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, width, height, file_size_bytes, content_type, exif_data FROM images WHERE url = ? LIMIT 1"
+	err := db.conn.QueryRow(query, url).Scan(&imageID, &imageURL, &altText, &summary, &tagsJSON, &base64Data, &width, &height, &fileSizeBytes, &contentType, &exifJSON)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -385,6 +442,25 @@ func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
 		Tags:       tags,
 		Base64Data: base64Data,
 	}
+	if width.Valid {
+		image.Width = int(width.Int64)
+	}
+	if height.Valid {
+		image.Height = int(height.Int64)
+	}
+	if fileSizeBytes.Valid {
+		image.FileSizeBytes = fileSizeBytes.Int64
+	}
+	if contentType.Valid {
+		image.ContentType = contentType.String
+	}
+	if exifJSON.Valid && exifJSON.String != "" && exifJSON.String != "null" {
+		var exif models.EXIFData
+		if err := json.Unmarshal([]byte(exifJSON.String), &exif); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal EXIF: %w", err)
+		}
+		image.EXIF = &exif
+	}
 
 	return image, nil
 }
@@ -397,7 +473,7 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 	}
 
 	// Query all images
-	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime FROM images ORDER BY created_at DESC"
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images ORDER BY created_at DESC"
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query images: %w", err)
@@ -414,9 +490,14 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 			tagsJSON          string
 			base64Data        string
 			tombstoneDatetime sql.NullTime
+			width             sql.NullInt64
+			height            sql.NullInt64
+			fileSizeBytes     sql.NullInt64
+			contentType       sql.NullString
+			exifJSON          sql.NullString
 		)
 
-		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime); err != nil {
+		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -455,6 +536,24 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 			if tombstoneDatetime.Valid {
 				image.TombstoneDatetime = &tombstoneDatetime.Time
 			}
+			if width.Valid {
+				image.Width = int(width.Int64)
+			}
+			if height.Valid {
+				image.Height = int(height.Int64)
+			}
+			if fileSizeBytes.Valid {
+				image.FileSizeBytes = fileSizeBytes.Int64
+			}
+			if contentType.Valid {
+				image.ContentType = contentType.String
+			}
+			if exifJSON.Valid && exifJSON.String != "" && exifJSON.String != "null" {
+				var exif models.EXIFData
+				if err := json.Unmarshal([]byte(exifJSON.String), &exif); err == nil {
+					image.EXIF = &exif
+				}
+			}
 			results = append(results, image)
 		}
 	}
@@ -468,7 +567,7 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 
 // GetImagesByScrapeID retrieves all images associated with a scrape ID
 func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) {
-	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime FROM images WHERE scrape_id = ? ORDER BY created_at"
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images WHERE scrape_id = ? ORDER BY created_at"
 	rows, err := db.conn.Query(query, scrapeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query images: %w", err)
@@ -485,9 +584,14 @@ func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) 
 			tagsJSON          string
 			base64Data        string
 			tombstoneDatetime sql.NullTime
+			width             sql.NullInt64
+			height            sql.NullInt64
+			fileSizeBytes     sql.NullInt64
+			contentType       sql.NullString
+			exifJSON          sql.NullString
 		)
 
-		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime); err != nil {
+		if err := rows.Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
@@ -509,6 +613,26 @@ func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) 
 		if tombstoneDatetime.Valid {
 			image.TombstoneDatetime = &tombstoneDatetime.Time
 		}
+		if width.Valid {
+			image.Width = int(width.Int64)
+		}
+		if height.Valid {
+			image.Height = int(height.Int64)
+		}
+		if fileSizeBytes.Valid {
+			image.FileSizeBytes = fileSizeBytes.Int64
+		}
+		if contentType.Valid {
+			image.ContentType = contentType.String
+		}
+		if exifJSON.Valid && exifJSON.String != "" && exifJSON.String != "null" {
+			var exif models.EXIFData
+			if err := json.Unmarshal([]byte(exifJSON.String), &exif); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal EXIF: %w", err)
+			}
+			image.EXIF = &exif
+		}
+
 		results = append(results, image)
 	}
 

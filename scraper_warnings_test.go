@@ -21,7 +21,7 @@ func TestScrapeWithWarnings(t *testing.T) {
 	}))
 	defer ollamaServer.Close()
 
-	// Create mock web server with content and images
+	// Create mock image server
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return a simple 1x1 red pixel PNG
 		imageData := []byte{
