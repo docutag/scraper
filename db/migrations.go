@@ -95,6 +95,24 @@ var migrations = []Migration{
 			ALTER TABLE images DROP COLUMN tombstone_datetime;
 		`,
 	},
+	{
+		Version: 6,
+		Name:    "add_image_metadata_columns",
+		Up: `
+			ALTER TABLE images ADD COLUMN width INTEGER;
+			ALTER TABLE images ADD COLUMN height INTEGER;
+			ALTER TABLE images ADD COLUMN file_size_bytes INTEGER;
+			ALTER TABLE images ADD COLUMN content_type TEXT;
+			ALTER TABLE images ADD COLUMN exif_data TEXT;
+		`,
+		Down: `
+			ALTER TABLE images DROP COLUMN exif_data;
+			ALTER TABLE images DROP COLUMN content_type;
+			ALTER TABLE images DROP COLUMN file_size_bytes;
+			ALTER TABLE images DROP COLUMN height;
+			ALTER TABLE images DROP COLUMN width;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

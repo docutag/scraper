@@ -1009,10 +1009,16 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 		close(results)
 	}()
 
-	// Collect results in order
+	// Collect results and preserve original order
+	resultsByIndex := make([]imageResult, len(images))
+	for result := range results {
+		resultsByIndex[result.index] = result
+	}
+
+	// Process results in original order
 	processedImages := make([]models.ImageInfo, 0, len(images))
 	failedAnalysis := 0
-	for result := range results {
+	for _, result := range resultsByIndex {
 		if result.existingRef != nil {
 			// Image already exists in database, add reference
 			existingRefs = append(existingRefs, *result.existingRef)
@@ -1043,6 +1049,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 // Returns the processed image, existing image reference (if found), and a warning string (empty if no issues)
 // If existingRef is non-nil, the image already exists and img should be ignored
 func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) (models.ImageInfo, *models.ExistingImageRef, string) {
+
 	// Check if image already exists in database (if DB is available)
 	if s.db != nil {
 		existingImage, err := s.db.GetImageByURL(img.URL)
