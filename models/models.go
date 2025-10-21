@@ -27,6 +27,7 @@ type ImageInfo struct {
 	Summary            string     `json:"summary"`
 	Tags               []string   `json:"tags"`
 	Base64Data         string     `json:"base64_data,omitempty"` // Base64 encoded image data
+	ScraperUUID        string     `json:"scraper_uuid,omitempty"` // UUID of the parent scraped data
 	TombstoneDatetime  *time.Time `json:"tombstone_datetime,omitempty"` // When the image was tombstoned
 	Width              int        `json:"width,omitempty"`       // Image width in pixels
 	Height             int        `json:"height,omitempty"`      // Image height in pixels
