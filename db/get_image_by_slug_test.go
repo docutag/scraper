@@ -11,6 +11,23 @@ func TestGetImageBySlug(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
+	// First, create a parent ScrapedData record (required for foreign key)
+	scrapeID := "test-scrape-id"
+	scrapedData := &models.ScrapedData{
+		ID:             scrapeID,
+		URL:            "https://example.com",
+		Title:          "Test Page",
+		Content:        "Test content",
+		Images:         []models.ImageInfo{},
+		Links:          []string{},
+		ProcessingTime: 1.0,
+	}
+
+	err := db.SaveScrapedData(scrapedData)
+	if err != nil {
+		t.Fatalf("Failed to save scraped data: %v", err)
+	}
+
 	// Create test image with slug
 	testImage := &models.ImageInfo{
 		ID:      "test-image-id",
@@ -24,8 +41,7 @@ func TestGetImageBySlug(t *testing.T) {
 	}
 
 	// Save the image
-	scrapeID := "test-scrape-id"
-	err := db.SaveImage(testImage, scrapeID)
+	err = db.SaveImage(testImage, scrapeID)
 	if err != nil {
 		t.Fatalf("Failed to save image: %v", err)
 	}
