@@ -85,11 +85,12 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 
 	// Insert or replace scraped data
 	query := `
-		INSERT INTO scraped_data (id, url, data, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO scraped_data (id, url, data, slug, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			id = excluded.id,
 			data = excluded.data,
+			slug = excluded.slug,
 			updated_at = excluded.updated_at
 	`
 
@@ -98,6 +99,7 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 		data.ID,
 		data.URL,
 		string(jsonData),
+		data.Slug,
 		data.FetchedAt,
 		time.Now(),
 	)
@@ -134,8 +136,8 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 		}
 
 		imageQuery := `
-			INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 
 		_, err = tx.Exec(
@@ -147,6 +149,8 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 			image.Summary,
 			string(tagsJSON),
 			image.Base64Data,
+			image.FilePath,
+			image.Slug,
 			image.Width,
 			image.Height,
 			image.FileSizeBytes,
@@ -304,8 +308,8 @@ func (db *DB) SaveImage(image *models.ImageInfo, scrapeID string) error {
 	}
 
 	query := `
-		INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err = db.conn.Exec(
@@ -317,6 +321,8 @@ func (db *DB) SaveImage(image *models.ImageInfo, scrapeID string) error {
 		image.Summary,
 		string(tagsJSON),
 		image.Base64Data,
+		image.FilePath,
+		image.Slug,
 		image.Width,
 		image.Height,
 		image.FileSizeBytes,
@@ -342,6 +348,8 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 		summary           string
 		tagsJSON          string
 		base64Data        string
+		filePath          sql.NullString
+		slugVal           sql.NullString
 		scrapeID          string
 		tombstoneDatetime sql.NullTime
 		width             sql.NullInt64
@@ -351,8 +359,8 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 		exifJSON          sql.NullString
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, base64_data, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images WHERE id = ?"
-	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &scrapeID, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON)
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, file_path, slug, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images WHERE id = ?"
+	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &base64Data, &filePath, &slugVal, &scrapeID, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -376,6 +384,12 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 		Tags:        tags,
 		Base64Data:  base64Data,
 		ScraperUUID: scrapeID,
+	}
+	if filePath.Valid {
+		image.FilePath = filePath.String
+	}
+	if slugVal.Valid {
+		image.Slug = slugVal.String
 	}
 	if tombstoneDatetime.Valid {
 		image.TombstoneDatetime = &tombstoneDatetime.Time
@@ -412,6 +426,8 @@ func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
 		summary       string
 		tagsJSON      string
 		base64Data    string
+		filePath      sql.NullString
+		slugVal       sql.NullString
 		scrapeID      string
 		width         sql.NullInt64
 		height        sql.NullInt64
@@ -420,8 +436,8 @@ func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
 		exifJSON      sql.NullString
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, base64_data, scrape_id, width, height, file_size_bytes, content_type, exif_data FROM images WHERE url = ? LIMIT 1"
-	err := db.conn.QueryRow(query, url).Scan(&imageID, &imageURL, &altText, &summary, &tagsJSON, &base64Data, &scrapeID, &width, &height, &fileSizeBytes, &contentType, &exifJSON)
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, file_path, slug, scrape_id, width, height, file_size_bytes, content_type, exif_data FROM images WHERE url = ? LIMIT 1"
+	err := db.conn.QueryRow(query, url).Scan(&imageID, &imageURL, &altText, &summary, &tagsJSON, &base64Data, &filePath, &slugVal, &scrapeID, &width, &height, &fileSizeBytes, &contentType, &exifJSON)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -445,6 +461,12 @@ func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
 		Tags:        tags,
 		Base64Data:  base64Data,
 		ScraperUUID: scrapeID,
+	}
+	if filePath.Valid {
+		image.FilePath = filePath.String
+	}
+	if slugVal.Valid {
+		image.Slug = slugVal.String
 	}
 	if width.Valid {
 		image.Width = int(width.Int64)

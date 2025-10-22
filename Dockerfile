@@ -28,7 +28,7 @@ RUN addgroup -g 1000 scraper && \
     adduser -D -u 1000 -G scraper scraper
 
 # Create necessary directories
-RUN mkdir -p /app/data && \
+RUN mkdir -p /app/data /app/storage && \
     chown -R scraper:scraper /app
 
 WORKDIR /app
@@ -42,8 +42,9 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 # Switch to non-root user
 USER scraper
 
-# Create volume for persistent data
+# Create volumes for persistent data
 VOLUME /app/data
+VOLUME /app/storage
 
 # Expose API port
 EXPOSE 8080

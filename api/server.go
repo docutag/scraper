@@ -12,12 +12,14 @@ import (
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/db"
 	"github.com/zombar/scraper/models"
+	"github.com/zombar/scraper/storage"
 )
 
 // Server represents the API server
 type Server struct {
 	db          *db.DB
 	scraper     *scraper.Scraper
+	storage     *storage.Storage
 	addr        string
 	server      *http.Server
 	mux         *http.ServeMux
@@ -50,12 +52,22 @@ func NewServer(config Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	// Initialize scraper with database for image deduplication
-	scraperInstance := scraper.New(config.ScraperConfig, database)
+	// Initialize filesystem storage
+	storageConfig := storage.Config{
+		BasePath: config.ScraperConfig.StoragePath,
+	}
+	storageInstance, err := storage.New(storageConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage: %w", err)
+	}
+
+	// Initialize scraper with database and storage
+	scraperInstance := scraper.New(config.ScraperConfig, database, storageInstance)
 
 	s := &Server{
 		db:          database,
 		scraper:     scraperInstance,
+		storage:     storageInstance,
 		addr:        config.Addr,
 		mux:         http.NewServeMux(),
 		corsEnabled: config.CORSEnabled,
@@ -85,8 +97,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/data/", s.handleData) // Handles /api/data/{id}
 	s.mux.HandleFunc("/api/data", s.handleList)
 	s.mux.HandleFunc("/api/images/search", s.handleImageSearch)
-	s.mux.HandleFunc("/api/images/", s.handleImage) // Handles /api/images/{id}
-	s.mux.HandleFunc("/api/scrapes/", s.handleScrapeImages) // Handles /api/scrapes/{id}/images
+	s.mux.HandleFunc("/api/images/", s.handleImage) // Handles /api/images/{id} and /api/images/{id}/file
+	s.mux.HandleFunc("/api/scrapes/", s.handleScrapeImages) // Handles /api/scrapes/{id}/images and /api/scrapes/{id}/content
 }
 
 // Start starts the API server
@@ -119,13 +131,17 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Logging
+		// Logging (skip health checks to reduce noise)
 		start := time.Now()
-		log.Printf("%s %s", r.Method, r.URL.Path)
+		if r.URL.Path != "/health" {
+			log.Printf("%s %s", r.Method, r.URL.Path)
+		}
 
 		next.ServeHTTP(w, r)
 
-		log.Printf("%s %s - completed in %v", r.Method, r.URL.Path, time.Since(start))
+		if r.URL.Path != "/health" {
+			log.Printf("%s %s - completed in %v", r.Method, r.URL.Path, time.Since(start))
+		}
 	})
 }
 
@@ -416,6 +432,17 @@ func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if this is a file serving request
+	if strings.HasSuffix(path, "/file") {
+		id := strings.TrimSuffix(path, "/file")
+		if r.Method == http.MethodGet {
+			s.handleServeImageFile(w, r, id)
+		} else {
+			respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+
 	// Check if this is a tombstone operation
 	if strings.HasSuffix(path, "/tombstone") {
 		id := strings.TrimSuffix(path, "/tombstone")
@@ -508,6 +535,58 @@ func (s *Server) handleUntombstoneImage(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
+// handleServeImageFile serves an image file from filesystem storage
+func (s *Server) handleServeImageFile(w http.ResponseWriter, r *http.Request, id string) {
+	// Get image metadata from database
+	image, err := s.db.GetImageByID(id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+
+	if image == nil {
+		respondError(w, http.StatusNotFound, "image not found")
+		return
+	}
+
+	// Check if image has a file path
+	if image.FilePath == "" {
+		// Fallback to base64 data if file path not available
+		if image.Base64Data == "" {
+			respondError(w, http.StatusNotFound, "image file not available")
+			return
+		}
+		// Serve base64 data as fallback (legacy support)
+		respondError(w, http.StatusNotFound, "image file not available in filesystem storage")
+		return
+	}
+
+	// Read image from storage
+	imageData, err := s.storage.ReadImage(image.FilePath)
+	if err != nil {
+		log.Printf("Failed to read image file %s: %v", image.FilePath, err)
+		respondError(w, http.StatusInternalServerError, "failed to read image file")
+		return
+	}
+
+	// Set content type header
+	if image.ContentType != "" {
+		w.Header().Set("Content-Type", image.ContentType)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+
+	// Set content length header
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(imageData)))
+
+	// Set cache control headers (cache for 1 year since images don't change)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+
+	// Write image data
+	w.WriteHeader(http.StatusOK)
+	w.Write(imageData)
+}
+
 // ImageSearchRequest represents a search request for images by tags
 type ImageSearchRequest struct {
 	Tags []string `json:"tags"`
@@ -558,8 +637,17 @@ func (s *Server) handleScrapeImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract scrape ID from path - format: /api/scrapes/{id}/images
+	// Extract path from URL
 	path := strings.TrimPrefix(r.URL.Path, "/api/scrapes/")
+
+	// Check if this is a content serving request
+	if strings.HasSuffix(path, "/content") {
+		id := strings.TrimSuffix(path, "/content")
+		s.handleServeContent(w, r, id)
+		return
+	}
+
+	// Extract scrape ID from path - format: /api/scrapes/{id}/images
 	path = strings.TrimSuffix(path, "/images")
 
 	if path == "" || path == r.URL.Path {
@@ -579,4 +667,47 @@ func (s *Server) handleScrapeImages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, response)
+}
+// handleServeContent serves HTML content from filesystem storage
+func (s *Server) handleServeContent(w http.ResponseWriter, r *http.Request, id string) {
+	// Get scraped data from database
+	data, err := s.db.GetByID(id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+
+	if data == nil {
+		respondError(w, http.StatusNotFound, "scrape not found")
+		return
+	}
+
+	// Check if content was saved to filesystem
+	if data.Slug == "" {
+		respondError(w, http.StatusNotFound, "content file not available")
+		return
+	}
+
+	// Set content type header
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Set cache control headers
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+
+	// Create simple HTML response with the content
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="UTF-8">
+	<title>%s</title>
+	<meta name="description" content="%s">
+</head>
+<body>
+	<h1>%s</h1>
+	<div>%s</div>
+</body>
+</html>`, data.Title, data.Metadata.Description, data.Title, data.Content)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(html))
 }

@@ -28,6 +28,7 @@ func main() {
 	// Default values
 	defaultPort := getEnv("PORT", "8080")
 	defaultDBPath := getEnv("DB_PATH", "scraper.db")
+	defaultStoragePath := getEnv("STORAGE_BASE_PATH", "./storage")
 	defaultOllamaURL := getEnv("OLLAMA_URL", "http://localhost:11434")
 	defaultOllamaModel := getEnv("OLLAMA_MODEL", "gpt-oss:20b")
 	defaultOllamaVisionModel := getEnv("OLLAMA_VISION_MODEL", defaultOllamaModel) // Default to same as text model if not specified
@@ -67,6 +68,7 @@ func main() {
 			MaxImageSizeBytes:   10 * 1024 * 1024, // 10MB
 			ImageTimeout:        15 * time.Second,
 			LinkScoreThreshold:  *scoreThreshold,
+			StoragePath:         defaultStoragePath,
 		},
 		CORSEnabled: !*disableCORS,
 	}

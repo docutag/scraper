@@ -113,6 +113,32 @@ var migrations = []Migration{
 			ALTER TABLE images DROP COLUMN width;
 		`,
 	},
+	{
+		Version: 7,
+		Name:    "add_filesystem_and_slug_to_images",
+		Up: `
+			ALTER TABLE images ADD COLUMN file_path TEXT;
+			ALTER TABLE images ADD COLUMN slug TEXT;
+			CREATE INDEX IF NOT EXISTS idx_images_slug ON images(slug);
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_images_slug;
+			ALTER TABLE images DROP COLUMN slug;
+			ALTER TABLE images DROP COLUMN file_path;
+		`,
+	},
+	{
+		Version: 8,
+		Name:    "add_slug_to_scraped_data",
+		Up: `
+			ALTER TABLE scraped_data ADD COLUMN slug TEXT;
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_scraped_data_slug ON scraped_data(slug);
+		`,
+		Down: `
+			DROP INDEX IF EXISTS idx_scraped_data_slug;
+			ALTER TABLE scraped_data DROP COLUMN slug;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

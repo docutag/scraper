@@ -14,7 +14,7 @@ import (
 
 func TestNew(t *testing.T) {
 	config := DefaultConfig()
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	if s == nil {
 		t.Fatal("Expected scraper to be non-nil")
@@ -81,7 +81,7 @@ func TestExtractLinks(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	links, err := s.ExtractLinks(ctx, webServer.URL)
@@ -108,7 +108,7 @@ func TestExtractLinks(t *testing.T) {
 
 func TestExtractLinksInvalidURL(t *testing.T) {
 	config := DefaultConfig()
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 
@@ -149,7 +149,7 @@ func TestExtractLinksHTTPError(t *testing.T) {
 	defer webServer.Close()
 
 	config := DefaultConfig()
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	_, err := s.ExtractLinks(ctx, webServer.URL)
@@ -184,7 +184,7 @@ func TestExtractLinksMalformedHTML(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	// Should not panic, should handle gracefully
@@ -209,7 +209,7 @@ func TestExtractLinksContextCancellation(t *testing.T) {
 	defer webServer.Close()
 
 	config := DefaultConfig()
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -250,7 +250,7 @@ func TestExtractLinksSanitizationFallback(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	links, err := s.ExtractLinks(ctx, webServer.URL)
@@ -301,7 +301,7 @@ func TestExtractLinksEmptyPage(t *testing.T) {
 		OllamaBaseURL: ollamaServer.URL,
 		OllamaModel:   "test-model",
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	links, err := s.ExtractLinks(ctx, webServer.URL)
@@ -385,7 +385,7 @@ func TestImageProcessing(t *testing.T) {
 		MaxImageSizeBytes:   10 * 1024 * 1024,
 		ImageTimeout:        5 * time.Second,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -463,7 +463,7 @@ func TestImageProcessingDisabled(t *testing.T) {
 		MaxImageSizeBytes:   10 * 1024 * 1024,
 		ImageTimeout:        5 * time.Second,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -525,7 +525,7 @@ func TestScoreLinkContent(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -581,7 +581,7 @@ func TestScoreLinkContentLowScore(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -629,7 +629,7 @@ func TestScoreLinkContentMalicious(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -653,7 +653,7 @@ func TestScoreLinkContentMalicious(t *testing.T) {
 
 func TestScoreLinkContentInvalidURL(t *testing.T) {
 	config := DefaultConfig()
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 
@@ -706,7 +706,7 @@ func TestScoreLinkContentOllamaFailure(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -770,7 +770,7 @@ func TestScoreLinkContentCustomThreshold(t *testing.T) {
 				OllamaModel:        "test-model",
 				LinkScoreThreshold: tt.threshold,
 			}
-			s := New(config, nil)
+			s := New(config, nil, nil)
 
 			ctx := context.Background()
 			score, err := s.ScoreLinkContent(ctx, webServer.URL)
@@ -845,7 +845,7 @@ func TestScrapeIncludesScore(t *testing.T) {
 		LinkScoreThreshold:  0.5,
 		EnableImageAnalysis: false, // Disable to simplify test
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -1264,7 +1264,7 @@ func TestScoreLinkContentAudioVideoWithOllama(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 
@@ -1307,7 +1307,7 @@ func TestScoreLinkContentImageURLSkipsScoring(t *testing.T) {
 		OllamaModel:        "test-model",
 		LinkScoreThreshold: 0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 
@@ -1382,7 +1382,7 @@ func TestScrapeWithFallbackScoring(t *testing.T) {
 	// Create scraper WITHOUT Ollama client (will fail and use fallback)
 	config := DefaultConfig()
 	config.LinkScoreThreshold = 0.5
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -1614,7 +1614,7 @@ func TestImageFiltering(t *testing.T) {
 	config := DefaultConfig()
 	config.OllamaBaseURL = ollamaServer.URL
 	config.EnableImageAnalysis = true
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	// Create test images - mix of valid and junk images
 	images := []models.ImageInfo{
