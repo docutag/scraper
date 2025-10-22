@@ -99,6 +99,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/images/search", s.handleImageSearch)
 	s.mux.HandleFunc("/api/images/", s.handleImage) // Handles /api/images/{id} and /api/images/{id}/file
 	s.mux.HandleFunc("/api/scrapes/", s.handleScrapeImages) // Handles /api/scrapes/{id}/images and /api/scrapes/{id}/content
+	s.mux.HandleFunc("/images/", s.handleImageBySlug) // Serves images by slug for SEO static pages
 }
 
 // Start starts the API server
@@ -533,6 +534,65 @@ func (s *Server) handleUntombstoneImage(w http.ResponseWriter, r *http.Request, 
 	respondJSON(w, http.StatusOK, map[string]string{
 		"message": "image untombstoned successfully",
 	})
+}
+
+// handleImageBySlug serves an image file by its slug (for SEO static pages)
+func (s *Server) handleImageBySlug(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Extract slug from path: /images/{slug}
+	slug := strings.TrimPrefix(r.URL.Path, "/images/")
+	if slug == "" {
+		respondError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+
+	// Look up image by slug
+	image, err := s.db.GetImageBySlug(slug)
+	if err != nil {
+		log.Printf("Error getting image by slug %s: %v", slug, err)
+		respondError(w, http.StatusInternalServerError, "database error")
+		return
+	}
+
+	if image == nil {
+		respondError(w, http.StatusNotFound, "image not found")
+		return
+	}
+
+	// Check if image is tombstoned
+	if image.TombstoneDatetime != nil {
+		respondError(w, http.StatusGone, "image has been tombstoned")
+		return
+	}
+
+	// Read image file from storage
+	if image.FilePath == "" {
+		respondError(w, http.StatusNotFound, "image file not found")
+		return
+	}
+
+	imageData, err := s.storage.ReadImage(image.FilePath)
+	if err != nil {
+		log.Printf("Error reading image file %s: %v", image.FilePath, err)
+		respondError(w, http.StatusInternalServerError, "failed to read image file")
+		return
+	}
+
+	// Set content type
+	contentType := image.ContentType
+	if contentType == "" {
+		contentType = "image/jpeg" // Default fallback
+	}
+
+	// Serve the image
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=31536000") // Cache for 1 year
+	w.WriteHeader(http.StatusOK)
+	w.Write(imageData)
 }
 
 // handleServeImageFile serves an image file from filesystem storage

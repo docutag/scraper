@@ -139,6 +139,16 @@ var migrations = []Migration{
 			ALTER TABLE scraped_data DROP COLUMN slug;
 		`,
 	},
+	{
+		Version: 9,
+		Name:    "add_relevance_score_to_images",
+		Up: `
+			ALTER TABLE images ADD COLUMN relevance_score REAL DEFAULT 0.5;
+		`,
+		Down: `
+			ALTER TABLE images DROP COLUMN relevance_score;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

@@ -323,6 +323,15 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		AIUsed:              aiUsed,
 	}
 
+	// Score images for relevance (for thumbnail selection)
+	if len(images) > 0 {
+		for i := range images {
+			images[i].RelevanceScore = scoreImageRelevance(images[i], i, len(images), title, categories)
+			log.Printf("Image %d relevance score: %.2f (dimensions: %dx%d, tags: %v)",
+				i, images[i].RelevanceScore, images[i].Width, images[i].Height, images[i].Tags)
+		}
+	}
+
 	// Generate slug from title
 	contentSlug := slug.GenerateWithFallback(title, targetURL)
 
@@ -965,6 +974,150 @@ func shouldSkipImage(imageURL string) bool {
 	}
 
 	return false
+}
+
+// scoreImageRelevance calculates a relevance score for an image (0.0-1.0)
+// Higher scores indicate images more suitable as article thumbnails
+// Lower scores for infographics, charts, banners, and other non-content images
+func scoreImageRelevance(img models.ImageInfo, position int, totalImages int, articleTitle string, articleTags []string) float64 {
+	score := 0.5 // Start with neutral score
+
+	// Dimension scoring - prefer larger images, but not extreme banners
+	if img.Width > 0 && img.Height > 0 {
+		// Ideal dimensions: 800-2000px wide, reasonable height
+		if img.Width >= 800 && img.Width <= 2000 && img.Height >= 400 {
+			score += 0.2
+		} else if img.Width >= 400 && img.Width < 800 {
+			score += 0.1
+		} else if img.Width < 200 || img.Height < 100 {
+			score -= 0.2 // Too small, likely icon or thumbnail
+		}
+
+		// Aspect ratio - penalize banner-like ratios
+		aspectRatio := float64(img.Width) / float64(img.Height)
+
+		// Ideal aspect ratio: 1.5:1 to 2:1 (typical article images)
+		if aspectRatio >= 1.3 && aspectRatio <= 2.1 {
+			score += 0.1
+		} else if aspectRatio > 5.0 || aspectRatio < 0.5 {
+			// Extreme ratios (banners, vertical strips)
+			score -= 0.3
+		} else if aspectRatio > 3.0 || aspectRatio < 0.7 {
+			// Moderately extreme ratios
+			score -= 0.15
+		}
+
+		// Penalize common banner sizes
+		if (img.Width == 728 && img.Height == 90) || // Standard banner
+			(img.Width == 468 && img.Height == 60) || // Full banner
+			(img.Width == 234 && img.Height == 60) || // Half banner
+			(img.Width == 120 && img.Height == 600) || // Skyscraper
+			(img.Width == 300 && img.Height == 250) || // Medium rectangle
+			(img.Width == 336 && img.Height == 280) {   // Large rectangle
+			score -= 0.4
+		}
+	}
+
+	// Position scoring - images earlier in the document are often more relevant
+	if totalImages > 0 {
+		positionRatio := float64(position) / float64(totalImages)
+		if positionRatio <= 0.25 {
+			// First quarter of images
+			score += 0.2
+		} else if positionRatio <= 0.5 {
+			// Second quarter
+			score += 0.1
+		} else if positionRatio > 0.75 {
+			// Last quarter - less likely to be main image
+			score -= 0.1
+		}
+	}
+
+	// Tag-based scoring - heavily penalize infographics, charts, diagrams
+	for _, tag := range img.Tags {
+		tagLower := strings.ToLower(tag)
+
+		// Infographic indicators (large penalty)
+		if tagLower == "banner" ||
+			strings.Contains(tagLower, "infographic") ||
+			strings.Contains(tagLower, "chart") ||
+			strings.Contains(tagLower, "diagram") ||
+			strings.Contains(tagLower, "graph") ||
+			strings.Contains(tagLower, "flowchart") ||
+			strings.Contains(tagLower, "visualization") ||
+			strings.Contains(tagLower, "data visualization") ||
+			strings.Contains(tagLower, "statistics") {
+			score -= 0.4
+		}
+
+		// UI elements (medium penalty)
+		if strings.Contains(tagLower, "icon") ||
+			strings.Contains(tagLower, "logo") ||
+			strings.Contains(tagLower, "button") ||
+			strings.Contains(tagLower, "avatar") {
+			score -= 0.3
+		}
+
+		// Positive indicators (photos, people, places)
+		if strings.Contains(tagLower, "photo") ||
+			strings.Contains(tagLower, "photograph") ||
+			strings.Contains(tagLower, "portrait") ||
+			strings.Contains(tagLower, "landscape") ||
+			strings.Contains(tagLower, "person") ||
+			strings.Contains(tagLower, "people") {
+			score += 0.1
+		}
+	}
+
+	// Alt text relevance - bonus if alt text matches article title or tags
+	if img.AltText != "" && articleTitle != "" {
+		altLower := strings.ToLower(img.AltText)
+		titleLower := strings.ToLower(articleTitle)
+
+		// Check if alt text contains words from title
+		titleWords := strings.Fields(titleLower)
+		matchCount := 0
+		for _, word := range titleWords {
+			if len(word) > 3 && strings.Contains(altLower, word) {
+				matchCount++
+			}
+		}
+		if matchCount > 2 {
+			score += 0.15
+		} else if matchCount > 0 {
+			score += 0.05
+		}
+
+		// Check if alt text matches any tags
+		for _, tag := range articleTags {
+			if len(tag) > 3 && strings.Contains(altLower, strings.ToLower(tag)) {
+				score += 0.05
+				break
+			}
+		}
+	}
+
+	// Summary-based scoring - check if summary mentions infographics
+	if img.Summary != "" {
+		summaryLower := strings.ToLower(img.Summary)
+		if strings.Contains(summaryLower, "infographic") ||
+			strings.Contains(summaryLower, "chart") ||
+			strings.Contains(summaryLower, "diagram") ||
+			strings.Contains(summaryLower, "graph") ||
+			strings.Contains(summaryLower, "data visualization") {
+			score -= 0.3
+		}
+	}
+
+	// Clamp score to 0.0-1.0 range
+	if score < 0.0 {
+		score = 0.0
+	}
+	if score > 1.0 {
+		score = 1.0
+	}
+
+	return score
 }
 
 // processImages downloads and analyzes images if image analysis is enabled

@@ -37,6 +37,7 @@ type ImageInfo struct {
 	FileSizeBytes      int64      `json:"file_size_bytes,omitempty"` // File size in bytes
 	ContentType        string     `json:"content_type,omitempty"` // MIME type (e.g., "image/jpeg")
 	EXIF               *EXIFData  `json:"exif,omitempty"`        // EXIF metadata from image file
+	RelevanceScore     float64    `json:"relevance_score,omitempty"` // Relevance score (0.0-1.0) for article thumbnail selection
 }
 
 // EXIFData contains EXIF metadata extracted from an image
