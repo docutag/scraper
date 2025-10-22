@@ -62,7 +62,7 @@ func TestScrapeWithWarnings(t *testing.T) {
 		ImageTimeout:        5 * time.Second,
 		LinkScoreThreshold:  0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -189,7 +189,7 @@ func TestScrapeNoWarnings(t *testing.T) {
 		ImageTimeout:        5 * time.Second,
 		LinkScoreThreshold:  0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	data, err := s.Scrape(ctx, webServer.URL)
@@ -264,7 +264,7 @@ func TestParallelImageProcessing(t *testing.T) {
 		MaxImageSizeBytes:   10 * 1024 * 1024,
 		ImageTimeout:        5 * time.Second,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 	start := time.Now()
@@ -351,7 +351,7 @@ func TestOllamaSemaphoreThrottling(t *testing.T) {
 		EnableImageAnalysis: false, // Disable to simplify test
 		LinkScoreThreshold:  0.5,
 	}
-	s := New(config, nil)
+	s := New(config, nil, nil)
 
 	ctx := context.Background()
 

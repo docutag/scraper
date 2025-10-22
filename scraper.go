@@ -25,6 +25,7 @@ import (
 	_ "golang.org/x/image/webp" // Register WebP format
 	"github.com/zombar/scraper/models"
 	"github.com/zombar/scraper/ollama"
+	"github.com/zombar/scraper/slug"
 	"golang.org/x/net/html"
 )
 
@@ -43,6 +44,7 @@ type Config struct {
 	MaxImageSizeBytes   int64         // Maximum image size to download (bytes)
 	ImageTimeout        time.Duration // Timeout for downloading individual images
 	LinkScoreThreshold  float64       // Minimum score for link to be recommended (0.0-1.0)
+	StoragePath         string        // Base path for filesystem storage
 }
 
 // DefaultConfig returns default scraper configuration
@@ -56,6 +58,7 @@ func DefaultConfig() Config {
 		MaxImageSizeBytes:   10 * 1024 * 1024,    // 10MB max image size
 		ImageTimeout:        15 * time.Second,    // 15s timeout per image
 		LinkScoreThreshold:  0.5,                 // Default threshold for link scoring
+		StoragePath:         "./storage",         // Default storage path
 	}
 }
 
@@ -66,16 +69,28 @@ type DB interface {
 
 // Scraper handles web scraping operations
 type Scraper struct {
-	config         Config
-	httpClient     *http.Client
-	ollamaClient   *ollama.Client
+	config          Config
+	httpClient      *http.Client
+	ollamaClient    *ollama.Client
 	ollamaSemaphore chan struct{} // Semaphore to limit concurrent Ollama requests
-	db             DB            // Database for checking existing images
+	db              DB            // Database for checking existing images
+	storage         Storage       // Filesystem storage for images and content
+}
+
+// Storage interface defines the storage operations needed by the scraper
+type Storage interface {
+	SaveImage(imageData []byte, slug, contentType string) (string, error)
+	SaveContent(content, slug string) (string, error)
+	ReadImage(relPath string) ([]byte, error)
+	ReadContent(relPath string) (string, error)
+	DeleteImage(relPath string) error
+	DeleteContent(relPath string) error
 }
 
 // New creates a new Scraper instance
 // db parameter can be nil if image deduplication is not needed
-func New(config Config, db DB) *Scraper {
+// storage parameter can be nil if filesystem storage is not needed
+func New(config Config, db DB, storage Storage) *Scraper {
 	// Limit concurrent Ollama requests to 3 to prevent overload during batch operations
 	maxConcurrentOllamaRequests := 3
 
@@ -94,6 +109,7 @@ func New(config Config, db DB) *Scraper {
 		ollamaClient:    ollama.NewClientWithVisionModel(config.OllamaBaseURL, config.OllamaModel, config.OllamaVisionModel),
 		ollamaSemaphore: make(chan struct{}, maxConcurrentOllamaRequests),
 		db:              db,
+		storage:         storage,
 	}
 }
 
@@ -307,6 +323,9 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		AIUsed:              aiUsed,
 	}
 
+	// Generate slug from title
+	contentSlug := slug.GenerateWithFallback(title, targetURL)
+
 	// Create scraped data
 	data := &models.ScrapedData{
 		ID:             uuid.New().String(),
@@ -322,6 +341,31 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		Metadata:       metadata,
 		Score:          linkScore,
 		Warnings:       warnings,
+		Slug:           contentSlug,
+	}
+
+	// Save content to filesystem if storage is available
+	if s.storage != nil && content != "" {
+		// Create simple HTML wrapper for content
+		htmlContent := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="UTF-8">
+	<title>%s</title>
+	<meta name="description" content="%s">
+</head>
+<body>
+	<h1>%s</h1>
+	<div>%s</div>
+</body>
+</html>`, title, metadata.Description, title, content)
+
+		_, err := s.storage.SaveContent(htmlContent, contentSlug)
+		if err != nil {
+			log.Printf("Failed to save content for %s to filesystem: %v", targetURL, err)
+			warnings = append(warnings, "Failed to save content to filesystem")
+			data.Warnings = warnings
+		}
 	}
 
 	return data, nil
@@ -1078,8 +1122,27 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 
 	log.Printf("Downloaded image %s (%d bytes)", img.URL, len(imageData))
 
-	// Store base64 encoded image data
-	img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+	// Generate slug from image info
+	img.Slug = slug.FromImageInfo(img.AltText, img.URL)
+	if img.Slug == "" {
+		img.Slug = img.ID // Fallback to UUID if slug generation fails
+	}
+
+	// Save to filesystem if storage is available
+	if s.storage != nil {
+		filePath, err := s.storage.SaveImage(imageData, img.Slug, contentType)
+		if err != nil {
+			log.Printf("Failed to save image %s to filesystem: %v", img.URL, err)
+			// Fall back to base64 if filesystem storage fails
+			img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+		} else {
+			img.FilePath = filePath
+			log.Printf("Saved image %s to %s", img.URL, filePath)
+		}
+	} else {
+		// No storage configured, use base64 for backward compatibility
+		img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+	}
 
 	// Populate file metadata
 	img.FileSizeBytes = int64(len(imageData))
@@ -1115,6 +1178,23 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 		// Update image info with analysis results
 		img.Summary = summary
 		img.Tags = tags
+
+		// Check if image contains an infographic and add "banner" tag
+		if isInfographic(summary, tags) {
+			// Check if "banner" tag doesn't already exist
+			hasBanner := false
+			for _, tag := range img.Tags {
+				if strings.EqualFold(tag, "banner") {
+					hasBanner = true
+					break
+				}
+			}
+			if !hasBanner {
+				img.Tags = append(img.Tags, "banner")
+				log.Printf("Detected infographic in image %s, added 'banner' tag", img.URL)
+			}
+		}
+
 		log.Printf("Successfully analyzed image %s (summary: %d chars, tags: %d)",
 			img.URL, len(summary), len(tags))
 		return img, nil, ""
@@ -1122,6 +1202,44 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 
 	log.Printf("Context cancelled while waiting for Ollama slot for image %s: %v", img.URL, err)
 	return img, nil, "analysis_timeout"
+}
+
+// isInfographic checks if an image contains an infographic based on summary and tags
+func isInfographic(summary string, tags []string) bool {
+	// Keywords that indicate an infographic
+	infographicKeywords := []string{
+		"infographic",
+		"info graphic",
+		"diagram",
+		"chart",
+		"graph",
+		"visualization",
+		"data visualization",
+		"flowchart",
+		"timeline",
+		"statistics",
+		"data presentation",
+	}
+
+	// Check summary (case-insensitive)
+	summaryLower := strings.ToLower(summary)
+	for _, keyword := range infographicKeywords {
+		if strings.Contains(summaryLower, keyword) {
+			return true
+		}
+	}
+
+	// Check tags (case-insensitive)
+	for _, tag := range tags {
+		tagLower := strings.ToLower(tag)
+		for _, keyword := range infographicKeywords {
+			if strings.Contains(tagLower, keyword) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // min returns the minimum of two integers

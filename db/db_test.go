@@ -204,10 +204,11 @@ func TestList(t *testing.T) {
 		data := &models.ScrapedData{
 			ID:             string(rune('a' + i)),
 			URL:            "https://example.com/" + string(rune('a'+i)),
-			Title:          "Test " + string(rune('a'+i)),
+			Title:          "Test Article Number " + string(rune('0'+i)),
 			Content:        "Content",
 			FetchedAt:      time.Now(),
 			ProcessingTime: 1.0,
+			Slug:           "test-article-number-" + string(rune('0'+i)),
 		}
 		if err := db.SaveScrapedData(data); err != nil {
 			t.Fatalf("Failed to save data: %v", err)
@@ -254,10 +255,11 @@ func TestCount(t *testing.T) {
 		data := &models.ScrapedData{
 			ID:             string(rune('a' + i)),
 			URL:            "https://example.com/" + string(rune('a'+i)),
-			Title:          "Test",
+			Title:          "Test Document " + string(rune('0'+i)),
 			Content:        "Content",
 			FetchedAt:      time.Now(),
 			ProcessingTime: 1.0,
+			Slug:           "test-document-" + string(rune('0'+i)),
 		}
 		if err := db.SaveScrapedData(data); err != nil {
 			t.Fatalf("Failed to save data: %v", err)

@@ -17,6 +17,7 @@ type ScrapedData struct {
 	Metadata       PageMetadata `json:"metadata"`
 	Score          *LinkScore   `json:"score,omitempty"` // Quality score for the URL
 	Warnings       []string     `json:"warnings,omitempty"` // Non-fatal processing warnings
+	Slug           string       `json:"slug,omitempty"` // SEO-friendly URL slug
 }
 
 // ImageInfo contains information about an extracted image
@@ -26,7 +27,9 @@ type ImageInfo struct {
 	AltText            string     `json:"alt_text"`
 	Summary            string     `json:"summary"`
 	Tags               []string   `json:"tags"`
-	Base64Data         string     `json:"base64_data,omitempty"` // Base64 encoded image data
+	Base64Data         string     `json:"base64_data,omitempty"` // Base64 encoded image data (deprecated, use FilePath)
+	FilePath           string     `json:"file_path,omitempty"` // Filesystem path to image
+	Slug               string     `json:"slug,omitempty"` // SEO-friendly URL slug
 	ScraperUUID        string     `json:"scraper_uuid,omitempty"` // UUID of the parent scraped data
 	TombstoneDatetime  *time.Time `json:"tombstone_datetime,omitempty"` // When the image was tombstoned
 	Width              int        `json:"width,omitempty"`       // Image width in pixels
