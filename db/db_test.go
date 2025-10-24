@@ -850,3 +850,127 @@ func TestDeleteImageByIDNotFound(t *testing.T) {
 		t.Errorf("Expected 'no image found' error, got: %v", err)
 	}
 }
+
+func TestUpdateImageTags(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Create a scraped data with an image
+	data := &models.ScrapedData{
+		ID:      "update-tags-test",
+		URL:     "https://example.com/updatetags",
+		Title:   "Update Tags Test",
+		Content: "Test content",
+		Images: []models.ImageInfo{
+			{
+				ID:      "update-tags-img",
+				URL:     "https://example.com/image.jpg",
+				AltText: "Test image",
+				Tags:    []string{"initial", "tags"},
+			},
+		},
+		FetchedAt:      time.Now(),
+		ProcessingTime: 1.0,
+	}
+
+	err := db.SaveScrapedData(data)
+	if err != nil {
+		t.Fatalf("Failed to save data: %v", err)
+	}
+
+	// Verify initial tags
+	img, err := db.GetImageByID("update-tags-img")
+	if err != nil {
+		t.Fatalf("Failed to get image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Image should exist")
+	}
+	if len(img.Tags) != 2 {
+		t.Errorf("Expected 2 initial tags, got %d", len(img.Tags))
+	}
+
+	// Update tags
+	newTags := []string{"updated", "tags", "new"}
+	err = db.UpdateImageTags("update-tags-img", newTags)
+	if err != nil {
+		t.Fatalf("Failed to update image tags: %v", err)
+	}
+
+	// Verify tags were updated
+	img, err = db.GetImageByID("update-tags-img")
+	if err != nil {
+		t.Fatalf("Failed to get updated image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Image should still exist")
+	}
+	if len(img.Tags) != 3 {
+		t.Errorf("Expected 3 updated tags, got %d", len(img.Tags))
+	}
+
+	for i, expectedTag := range newTags {
+		if img.Tags[i] != expectedTag {
+			t.Errorf("Expected tag %s at position %d, got %s", expectedTag, i, img.Tags[i])
+		}
+	}
+}
+
+func TestUpdateImageTagsNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	err := db.UpdateImageTags("non-existent-img", []string{"test"})
+	if err == nil {
+		t.Error("Expected error for non-existent image")
+	}
+	if err.Error() != "image not found" {
+		t.Errorf("Expected 'image not found' error, got: %v", err)
+	}
+}
+
+func TestUpdateImageTagsEmptyList(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Create a scraped data with an image
+	data := &models.ScrapedData{
+		ID:      "empty-tags-test",
+		URL:     "https://example.com/emptytags",
+		Title:   "Empty Tags Test",
+		Content: "Test content",
+		Images: []models.ImageInfo{
+			{
+				ID:      "empty-tags-img",
+				URL:     "https://example.com/image.jpg",
+				AltText: "Test image",
+				Tags:    []string{"tag1", "tag2"},
+			},
+		},
+		FetchedAt:      time.Now(),
+		ProcessingTime: 1.0,
+	}
+
+	err := db.SaveScrapedData(data)
+	if err != nil {
+		t.Fatalf("Failed to save data: %v", err)
+	}
+
+	// Update to empty tags
+	err = db.UpdateImageTags("empty-tags-img", []string{})
+	if err != nil {
+		t.Fatalf("Failed to update image tags to empty: %v", err)
+	}
+
+	// Verify tags were cleared
+	img, err := db.GetImageByID("empty-tags-img")
+	if err != nil {
+		t.Fatalf("Failed to get updated image: %v", err)
+	}
+	if img == nil {
+		t.Fatal("Image should still exist")
+	}
+	if len(img.Tags) != 0 {
+		t.Errorf("Expected 0 tags after clearing, got %d", len(img.Tags))
+	}
+}
