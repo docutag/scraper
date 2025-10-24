@@ -785,9 +785,12 @@ func (db *DB) DeleteImageByID(id string) error {
 
 // TombstoneImageByID sets the tombstone_datetime for an image
 func (db *DB) TombstoneImageByID(id string) error {
+	// Set tombstone date to 90 days from now (same as manual request tombstoning)
+	tombstoneTime := time.Now().UTC().Add(90 * 24 * time.Hour)
+
 	result, err := db.conn.Exec(
 		"UPDATE images SET tombstone_datetime = ? WHERE id = ?",
-		time.Now().UTC(),
+		tombstoneTime,
 		id,
 	)
 	if err != nil {
@@ -823,6 +826,32 @@ func (db *DB) UntombstoneImageByID(id string) error {
 
 	if rows == 0 {
 		return fmt.Errorf("no image found with id: %s", id)
+	}
+
+	return nil
+}
+
+// UpdateImageTags updates the tags for a specific image
+func (db *DB) UpdateImageTags(id string, tags []string) error {
+	// Marshal tags to JSON
+	tagsJSON, err := json.Marshal(tags)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tags: %w", err)
+	}
+
+	// Update tags in database
+	result, err := db.conn.Exec("UPDATE images SET tags = ? WHERE id = ?", string(tagsJSON), id)
+	if err != nil {
+		return fmt.Errorf("failed to update image tags: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("image not found")
 	}
 
 	return nil

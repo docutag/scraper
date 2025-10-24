@@ -7,7 +7,8 @@ type ScrapedData struct {
 	ID             string       `json:"id"`
 	URL            string       `json:"url"`
 	Title          string       `json:"title"`
-	Content        string       `json:"content"`
+	Content        string       `json:"content"`     // AI-cleaned content (or raw if AI unavailable)
+	RawText        string       `json:"raw_text"`    // Original raw text extracted from HTML
 	Images         []ImageInfo  `json:"images"`
 	Links          []string     `json:"links"`
 	FetchedAt      time.Time    `json:"fetched_at"`

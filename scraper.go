@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +46,7 @@ type Config struct {
 	ImageTimeout        time.Duration // Timeout for downloading individual images
 	LinkScoreThreshold  float64       // Minimum score for link to be recommended (0.0-1.0)
 	StoragePath         string        // Base path for filesystem storage
+	MaxImages           int           // Maximum number of images to download per scrape (0 = unlimited)
 }
 
 // DefaultConfig returns default scraper configuration
@@ -59,6 +61,7 @@ func DefaultConfig() Config {
 		ImageTimeout:        15 * time.Second,    // 15s timeout per image
 		LinkScoreThreshold:  0.5,                 // Default threshold for link scoring
 		StoragePath:         "./storage",         // Default storage path
+		MaxImages:           20,                  // Download max 20 images per scrape
 	}
 }
 
@@ -341,6 +344,7 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		URL:            targetURL,
 		Title:          title,
 		Content:        content,
+		RawText:        textContent, // Always store original raw text
 		Images:         images,
 		Links:          links,
 		FetchedAt:      time.Now(),
@@ -548,12 +552,23 @@ func extractImages(n *html.Node, baseURL *url.URL) []models.ImageInfo {
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "img" {
 			var src, alt string
+			var width, height int
 			for _, attr := range n.Attr {
 				switch attr.Key {
 				case "src":
 					src = attr.Val
 				case "alt":
 					alt = attr.Val
+				case "width":
+					// Try to parse width attribute (may be in pixels or other units)
+					if w, err := strconv.Atoi(strings.TrimSpace(attr.Val)); err == nil && w > 0 {
+						width = w
+					}
+				case "height":
+					// Try to parse height attribute (may be in pixels or other units)
+					if h, err := strconv.Atoi(strings.TrimSpace(attr.Val)); err == nil && h > 0 {
+						height = h
+					}
 				}
 			}
 			if src != "" {
@@ -562,6 +577,8 @@ func extractImages(n *html.Node, baseURL *url.URL) []models.ImageInfo {
 					images = append(images, models.ImageInfo{
 						URL:     imgURL,
 						AltText: alt,
+						Width:   width,  // HTML attribute hint (0 if not specified)
+						Height:  height, // HTML attribute hint (0 if not specified)
 						Summary: "",
 						Tags:    []string{},
 					})
@@ -1161,6 +1178,33 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 
 	// Use filtered images for processing
 	images = filteredImages
+
+	// Apply max images limit if configured
+	if s.config.MaxImages > 0 && len(images) > s.config.MaxImages {
+		// Sort images by size (pixel area) in descending order to prioritize larger images
+		// Images without dimensions (0x0) will sort to the end
+		sort.Slice(images, func(i, j int) bool {
+			areaI := images[i].Width * images[i].Height
+			areaJ := images[j].Width * images[j].Height
+			// If both have dimensions, sort by area (largest first)
+			if areaI > 0 && areaJ > 0 {
+				return areaI > areaJ
+			}
+			// If only one has dimensions, prefer the one with dimensions
+			if areaI > 0 {
+				return true
+			}
+			if areaJ > 0 {
+				return false
+			}
+			// If neither has dimensions, maintain original order (stable)
+			return i < j
+		})
+
+		log.Printf("Sorted %d images by size, limiting to top %d largest (MAX_IMAGES=%d)", len(images), s.config.MaxImages, s.config.MaxImages)
+		warnings = append(warnings, fmt.Sprintf("Limited to %d largest images (found %d total)", s.config.MaxImages, len(images)))
+		images = images[:s.config.MaxImages]
+	}
 
 	// Use a worker pool for parallel image processing
 	const maxWorkers = 5

@@ -33,12 +33,24 @@ func main() {
 	defaultOllamaModel := getEnv("OLLAMA_MODEL", "gpt-oss:20b")
 	defaultOllamaVisionModel := getEnv("OLLAMA_VISION_MODEL", defaultOllamaModel) // Default to same as text model if not specified
 	defaultLinkScoreThreshold := getEnv("LINK_SCORE_THRESHOLD", "0.5")
+	defaultMaxImages := getEnv("MAX_IMAGES", "20")
 
 	// Parse link score threshold
 	linkScoreThreshold, err := strconv.ParseFloat(defaultLinkScoreThreshold, 64)
 	if err != nil {
 		log.Printf("Invalid LINK_SCORE_THRESHOLD value, using default 0.5: %v", err)
 		linkScoreThreshold = 0.5
+	}
+
+	// Parse max images limit
+	maxImages, err := strconv.Atoi(defaultMaxImages)
+	if err != nil {
+		log.Printf("Invalid MAX_IMAGES value, using default 20: %v", err)
+		maxImages = 20
+	}
+	if maxImages < 0 {
+		log.Printf("MAX_IMAGES cannot be negative, using default 20")
+		maxImages = 20
 	}
 
 	// Command-line flags (override environment variables)
@@ -69,6 +81,7 @@ func main() {
 			ImageTimeout:        15 * time.Second,
 			LinkScoreThreshold:  *scoreThreshold,
 			StoragePath:         defaultStoragePath,
+			MaxImages:           maxImages, // Maximum images to download per scrape
 		},
 		CORSEnabled: !*disableCORS,
 	}
