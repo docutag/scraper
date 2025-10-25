@@ -211,6 +211,28 @@ Format your response as JSON with the following structure:
 	return result.Summary, result.Tags, nil
 }
 
+// ExtractTextFromImage uses Ollama vision to perform OCR and extract text from an image
+func (c *Client) ExtractTextFromImage(ctx context.Context, imageData []byte) (string, error) {
+	prompt := `Extract all visible text from this image. Return ONLY the extracted text without any commentary, explanations, or formatting. If there is no readable text in the image, return an empty string.
+
+Rules:
+- Preserve the approximate reading order (left to right, top to bottom)
+- Keep the original text formatting where meaningful
+- Do not add explanations or descriptions
+- If the text is in a non-English language, transcribe it as-is
+- If you cannot read any text, return an empty string`
+
+	response, err := c.GenerateWithVision(ctx, prompt, imageData)
+	if err != nil {
+		return "", fmt.Errorf("failed to extract text from image: %w", err)
+	}
+
+	// Trim whitespace
+	response = strings.TrimSpace(response)
+
+	return response, nil
+}
+
 // normalizeTag normalizes a tag according to the tagging rules:
 // - Converts to lowercase
 // - Replaces spaces and underscores with hyphens

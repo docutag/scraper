@@ -1,18 +1,32 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	exif "github.com/rwcarlsen/goexif/exif"
+	_ "golang.org/x/image/webp"
+	"github.com/zombar/purpletab/pkg/metrics"
+	"github.com/zombar/purpletab/pkg/tracing"
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/db"
 	"github.com/zombar/scraper/models"
+	"github.com/zombar/scraper/slug"
 	"github.com/zombar/scraper/storage"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Server represents the API server
@@ -24,6 +38,8 @@ type Server struct {
 	server      *http.Server
 	mux         *http.ServeMux
 	corsEnabled bool
+	httpMetrics *metrics.HTTPMetrics
+	dbMetrics   *metrics.DatabaseMetrics
 }
 
 // Config contains server configuration
@@ -64,6 +80,10 @@ func NewServer(config Config) (*Server, error) {
 	// Initialize scraper with database and storage
 	scraperInstance := scraper.New(config.ScraperConfig, database, storageInstance)
 
+	// Initialize Prometheus metrics
+	httpMetrics := metrics.NewHTTPMetrics("scraper")
+	dbMetrics := metrics.NewDatabaseMetrics("scraper")
+
 	s := &Server{
 		db:          database,
 		scraper:     scraperInstance,
@@ -71,15 +91,32 @@ func NewServer(config Config) (*Server, error) {
 		addr:        config.Addr,
 		mux:         http.NewServeMux(),
 		corsEnabled: config.CORSEnabled,
+		httpMetrics: httpMetrics,
+		dbMetrics:   dbMetrics,
 	}
+
+	// Start periodic database stats collection
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			dbMetrics.UpdateDBStats(database.DB())
+		}
+	}()
 
 	// Register routes
 	s.registerRoutes()
 
-	// Create HTTP server
+	// Create HTTP server with middleware chain: metrics -> tracing -> CORS -> handlers
+	httpHandler := httpMetrics.HTTPMiddleware(
+		tracing.HTTPMiddleware("scraper")(
+			s.middleware(s.mux),
+		),
+	)
+
 	s.server = &http.Server{
 		Addr:         config.Addr,
-		Handler:      s.middleware(s.mux),
+		Handler:      httpHandler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 15 * time.Minute, // Allow time for long-running scrapes
 		IdleTimeout:  120 * time.Second,
@@ -90,8 +127,10 @@ func NewServer(config Config) (*Server, error) {
 
 // registerRoutes sets up all API routes
 func (s *Server) registerRoutes() {
+	s.mux.Handle("/metrics", metrics.Handler()) // Prometheus metrics endpoint
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/scrape", s.handleScrape)
+	s.mux.HandleFunc("/api/process-image", s.handleProcessImage) // Handles image upload and processing
 	s.mux.HandleFunc("/api/extract-links", s.handleExtractLinks)
 	s.mux.HandleFunc("/api/score", s.handleScore)
 	s.mux.HandleFunc("/api/data/", s.handleData) // Handles /api/data/{id}
@@ -190,36 +229,83 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Add URL to span attributes
+	tracing.SetSpanAttributes(r.Context(),
+		attribute.String("scrape.url", req.URL),
+		attribute.Bool("scrape.force", req.Force),
+	)
+
 	// Check if URL already exists (unless force is true)
 	if !req.Force {
+		ctx, span := tracing.StartSpan(r.Context(), "database.check_existing")
+		span.SetAttributes(attribute.String("db.url", req.URL))
+
 		existing, err := s.db.GetByURL(req.URL)
 		if err != nil {
+			tracing.RecordError(ctx, err)
+			span.End()
 			respondError(w, http.StatusInternalServerError, "database error")
 			return
 		}
+
 		if existing != nil {
 			// Mark as cached
 			existing.Cached = true
+			tracing.AddEvent(ctx, "cache_hit",
+				attribute.String("cached_id", existing.ID))
+			span.SetAttributes(
+				attribute.Bool("db.found", true),
+				attribute.String("db.uuid", existing.ID))
+			span.End()
 			respondJSON(w, http.StatusOK, existing)
 			return
 		}
+
+		span.SetAttributes(attribute.Bool("db.found", false))
+		span.End()
 	}
 
 	// Scrape the URL
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
+	ctx, scrapeSpan := tracing.StartSpan(ctx, "scraper.scrape")
+	scrapeSpan.SetAttributes(
+		attribute.String("scrape.url", req.URL),
+		attribute.String("scrape.timeout", "10m"))
+
 	result, err := s.scraper.Scrape(ctx, req.URL)
 	if err != nil {
+		tracing.RecordError(ctx, err)
+		scrapeSpan.End()
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("scraping failed: %v", err))
 		return
 	}
 
+	// Add scrape result metrics to span
+	scrapeSpan.SetAttributes(
+		attribute.String("scrape.uuid", result.ID),
+		attribute.Int("scrape.links_count", len(result.Links)),
+		attribute.Int("scrape.images_count", len(result.Images)),
+		attribute.String("scrape.title", result.Title))
+	scrapeSpan.End()
+
 	// Save to database
+	ctx, saveSpan := tracing.StartSpan(r.Context(), "database.save")
+	saveSpan.SetAttributes(
+		attribute.String("db.uuid", result.ID),
+		attribute.Int("db.links", len(result.Links)),
+		attribute.Int("db.images", len(result.Images)))
+
 	if err := s.db.SaveScrapedData(result); err != nil {
 		log.Printf("Failed to save data: %v", err)
+		tracing.RecordError(ctx, err)
 		// Still return the result even if save fails
+	} else {
+		tracing.AddEvent(ctx, "data_saved",
+			attribute.String("uuid", result.ID))
 	}
+	saveSpan.End()
 
 	respondJSON(w, http.StatusOK, result)
 }
@@ -770,4 +856,242 @@ func (s *Server) handleServeContent(w http.ResponseWriter, r *http.Request, id s
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
+}
+
+// ProcessImageRequest represents a request to process an uploaded image
+type ProcessImageRequest struct {
+	ExtractedText string `json:"extracted_text"` // OCR extracted text from image
+	Title         string `json:"title"`          // Auto-generated title
+	ImageID       string `json:"image_id"`       // Image UUID
+	ImageURL      string `json:"image_url"`      // Synthetic URL for uploaded image
+	Summary       string `json:"summary"`        // AI-generated summary
+	Tags          []string `json:"tags"`         // AI-generated tags
+}
+
+// handleProcessImage processes an uploaded image file
+// This endpoint accepts multipart form data with an image file, performs OCR,
+// analyzes the image with AI, and returns the processed image metadata.
+// The extracted text can be used to create a document.
+func (s *Server) handleProcessImage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Parse multipart form (10MB max)
+	err := r.ParseMultipartForm(10 << 20)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "failed to parse multipart form")
+		return
+	}
+
+	// Get the image file from form
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "image file is required")
+		return
+	}
+	defer file.Close()
+
+	// Read image data
+	imageData, err := io.ReadAll(file)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to read image data")
+		return
+	}
+
+	// Validate image size
+	if int64(len(imageData)) > s.scraper.Config().MaxImageSizeBytes {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("image too large: %d bytes (max: %d)", len(imageData), s.scraper.Config().MaxImageSizeBytes))
+		return
+	}
+
+	log.Printf("Processing uploaded image: %s (%d bytes)", header.Filename, len(imageData))
+
+	// Generate UUID for the image
+	imageID := uuid.New().String()
+
+	// Create a synthetic URL for the uploaded image
+	imageURL := fmt.Sprintf("upload://%s/%s", imageID, header.Filename)
+
+	// Get content type from header or detect from data
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(imageData)
+	}
+
+	// Create ImageInfo structure
+	img := models.ImageInfo{
+		ID:          imageID,
+		URL:         imageURL,
+		ContentType: contentType,
+		FileSizeBytes: int64(len(imageData)),
+	}
+
+	// Generate slug from filename
+	img.Slug = slug.FromImageInfo(header.Filename, imageURL)
+	if img.Slug == "" {
+		img.Slug = imageID // Fallback to UUID
+	}
+
+	// Save image to filesystem if storage is available
+	if s.storage != nil {
+		filePath, err := s.storage.SaveImage(imageData, img.Slug, contentType)
+		if err != nil {
+			log.Printf("Failed to save uploaded image to filesystem: %v", err)
+			respondError(w, http.StatusInternalServerError, "failed to save image")
+			return
+		}
+		img.FilePath = filePath
+		log.Printf("Saved uploaded image to %s", filePath)
+	} else {
+		// Fallback to base64 if no storage configured
+		img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
+	}
+
+	// Extract image dimensions
+	width, height, err := getImageDimensions(imageData)
+	if err != nil {
+		log.Printf("Failed to get dimensions for uploaded image: %v", err)
+	} else {
+		img.Width = width
+		img.Height = height
+		log.Printf("Uploaded image dimensions: %dx%d", width, height)
+	}
+
+	// Extract EXIF metadata
+	if exifData := extractEXIF(imageData); exifData != nil {
+		img.EXIF = exifData
+		log.Printf("Extracted EXIF data from uploaded image")
+	}
+
+	// Process image with AI: analyze and extract text
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	// Analyze the image with Ollama
+	summary, tags, err := s.scraper.OllamaClient().AnalyzeImage(ctx, imageData, "")
+	if err != nil {
+		log.Printf("Failed to analyze uploaded image: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to analyze image")
+		return
+	}
+	img.Summary = summary
+	img.Tags = tags
+	log.Printf("Analyzed uploaded image (summary: %d chars, tags: %d)", len(summary), len(tags))
+
+	// Extract text from image using OCR
+	extractedText, err := s.scraper.OllamaClient().ExtractTextFromImage(ctx, imageData)
+	if err != nil {
+		log.Printf("Failed to extract text from uploaded image: %v", err)
+		// OCR failure is not critical, continue without text
+	} else {
+		img.ExtractedText = extractedText
+		log.Printf("Extracted %d characters of text from uploaded image", len(extractedText))
+	}
+
+	// Auto-generate title from extracted text (use first 100 chars or summary)
+	title := ""
+	if extractedText != "" {
+		// Use first line or first 100 chars of extracted text
+		lines := strings.Split(extractedText, "\n")
+		if len(lines) > 0 && len(lines[0]) > 0 {
+			title = lines[0]
+			if len(title) > 100 {
+				title = title[:100] + "..."
+			}
+		}
+	}
+	if title == "" && summary != "" {
+		// Fallback to first 100 chars of summary
+		title = summary
+		if len(title) > 100 {
+			title = title[:100] + "..."
+		}
+	}
+	if title == "" {
+		// Last resort: use filename
+		title = header.Filename
+	}
+
+	// Save image to database (without scrape_id since this is a standalone upload)
+	// We'll use empty string for scrape_id
+	if err := s.db.SaveImage(&img, ""); err != nil {
+		log.Printf("Failed to save uploaded image to database: %v", err)
+		respondError(w, http.StatusInternalServerError, "failed to save image metadata")
+		return
+	}
+
+	log.Printf("Successfully processed uploaded image %s (ID: %s)", header.Filename, imageID)
+
+	// Return response with image metadata
+	response := ProcessImageRequest{
+		ImageID:       img.ID,
+		ImageURL:      img.URL,
+		ExtractedText: img.ExtractedText,
+		Title:         title,
+		Summary:       img.Summary,
+		Tags:          img.Tags,
+	}
+
+	respondJSON(w, http.StatusOK, response)
+}
+
+// getImageDimensions extracts width and height from image data (imported from scraper package)
+func getImageDimensions(imageData []byte) (int, int, error) {
+	img, _, err := image.DecodeConfig(bytes.NewReader(imageData))
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to decode image: %w", err)
+	}
+	return img.Width, img.Height, nil
+}
+
+// extractEXIF extracts EXIF metadata from image data (imported from scraper package)
+func extractEXIF(imageData []byte) *models.EXIFData {
+	x, err := exif.Decode(bytes.NewReader(imageData))
+	if err != nil {
+		return nil
+	}
+
+	exifData := &models.EXIFData{}
+
+	if dt, err := x.DateTime(); err == nil {
+		exifData.DateTime = dt.Format(time.RFC3339)
+	}
+
+	if tag, err := x.Get(exif.DateTimeOriginal); err == nil {
+		if dtStr, err := tag.StringVal(); err == nil {
+			if dt, err := time.Parse("2006:01:02 15:04:05", dtStr); err == nil {
+				exifData.DateTimeOriginal = dt.Format(time.RFC3339)
+			}
+		}
+	}
+
+	if tag, err := x.Get(exif.Make); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Make = strings.TrimSpace(val)
+		}
+	}
+
+	if tag, err := x.Get(exif.Model); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Model = strings.TrimSpace(val)
+		}
+	}
+
+	if tag, err := x.Get(exif.Copyright); err == nil {
+		if val, err := tag.StringVal(); err == nil {
+			exifData.Copyright = strings.TrimSpace(val)
+		}
+	}
+
+	lat, long, err := x.LatLong()
+	if err == nil {
+		exifData.GPS = &models.GPSData{
+			Latitude:  lat,
+			Longitude: long,
+		}
+	}
+
+	return exifData
 }

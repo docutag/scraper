@@ -7,12 +7,17 @@ RUN apk add --no-cache git ca-certificates tzdata
 # Set working directory
 WORKDIR /build
 
-# Copy go mod files first for better caching
-COPY go.mod go.sum ./
+# Copy shared packages
+COPY pkg/tracing ./pkg/tracing
+COPY pkg/metrics ./pkg/metrics
+
+# Copy service go mod files first for better caching
+COPY apps/scraper/go.mod apps/scraper/go.sum ./apps/scraper/
+WORKDIR /build/apps/scraper
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy service source code
+COPY apps/scraper ./
 
 # Build binary (pure Go with modernc.org/sqlite)
 RUN GOOS=linux go build -a -ldflags="-w -s" -o scraper-api ./cmd/api
@@ -34,7 +39,7 @@ RUN mkdir -p /app/data /app/storage && \
 WORKDIR /app
 
 # Copy binaries from builder
-COPY --from=builder /build/scraper-api .
+COPY --from=builder /build/apps/scraper/scraper-api .
 
 # Copy timezone data
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo

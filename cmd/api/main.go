@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/zombar/purpletab/pkg/tracing"
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/api"
 	"github.com/zombar/scraper/db"
@@ -25,6 +25,27 @@ func getEnv(key, defaultValue string) string {
 }
 
 func main() {
+	// Setup structured logging with JSON output
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
+	logger.Info("scraper service initializing", "version", "1.0.0")
+
+	// Initialize tracing
+	tp, err := tracing.InitTracer("purpletab-scraper")
+	if err != nil {
+		logger.Warn("failed to initialize tracer, continuing without tracing", "error", err)
+	} else {
+		defer func() {
+			if err := tp.Shutdown(context.Background()); err != nil {
+				logger.Error("error shutting down tracer", "error", err)
+			}
+		}()
+		logger.Info("tracing initialized successfully")
+	}
+
 	// Default values
 	defaultPort := getEnv("PORT", "8080")
 	defaultDBPath := getEnv("DB_PATH", "scraper.db")
@@ -38,18 +59,26 @@ func main() {
 	// Parse link score threshold
 	linkScoreThreshold, err := strconv.ParseFloat(defaultLinkScoreThreshold, 64)
 	if err != nil {
-		log.Printf("Invalid LINK_SCORE_THRESHOLD value, using default 0.5: %v", err)
+		logger.Warn("invalid LINK_SCORE_THRESHOLD value, using default",
+			"provided", defaultLinkScoreThreshold,
+			"default", 0.5,
+			"error", err,
+		)
 		linkScoreThreshold = 0.5
 	}
 
 	// Parse max images limit
 	maxImages, err := strconv.Atoi(defaultMaxImages)
 	if err != nil {
-		log.Printf("Invalid MAX_IMAGES value, using default 20: %v", err)
+		logger.Warn("invalid MAX_IMAGES value, using default",
+			"provided", defaultMaxImages,
+			"default", 20,
+			"error", err,
+		)
 		maxImages = 20
 	}
 	if maxImages < 0 {
-		log.Printf("MAX_IMAGES cannot be negative, using default 20")
+		logger.Warn("MAX_IMAGES cannot be negative, using default", "provided", maxImages, "default", 20)
 		maxImages = 20
 	}
 
@@ -89,13 +118,27 @@ func main() {
 	// Create server
 	server, err := api.NewServer(config)
 	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
+		logger.Error("failed to create server", "error", err)
+		os.Exit(1)
 	}
 
 	// Start server in a goroutine
 	go func() {
+		logger.Info("scraper service starting",
+			"port", *port,
+			"database", *dbPath,
+			"storage_path", defaultStoragePath,
+			"ollama_url", *ollamaURL,
+			"ollama_model", *ollamaModel,
+			"ollama_vision_model", *ollamaVisionModel,
+			"link_score_threshold", *scoreThreshold,
+			"max_images", maxImages,
+			"image_analysis_enabled", !*disableImageAnalysis,
+		)
+
 		if err := server.Start(); err != nil {
-			log.Fatalf("Server error: %v", err)
+			logger.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -105,13 +148,14 @@ func main() {
 	<-quit
 
 	// Graceful shutdown
-	fmt.Println("\nShutting down gracefully...")
+	logger.Info("shutting down gracefully")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("Server shutdown error: %v", err)
+		logger.Error("server shutdown error", "error", err)
+		os.Exit(1)
 	}
 
-	fmt.Println("Server stopped")
+	logger.Info("server stopped")
 }
