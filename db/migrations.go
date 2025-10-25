@@ -149,6 +149,16 @@ var migrations = []Migration{
 			ALTER TABLE images DROP COLUMN relevance_score;
 		`,
 	},
+	{
+		Version: 10,
+		Name:    "add_extracted_text_to_images",
+		Up: `
+			ALTER TABLE images ADD COLUMN extracted_text TEXT;
+		`,
+		Down: `
+			ALTER TABLE images DROP COLUMN extracted_text;
+		`,
+	},
 }
 
 // Migrate runs all pending migrations

@@ -9,12 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/db"
 )
 
 func setupTestServer(t *testing.T) (*Server, func()) {
 	t.Helper()
+
+	// Reset Prometheus registry to avoid metric registration conflicts between tests
+	prometheus.DefaultRegisterer = prometheus.NewRegistry()
 
 	// Create temp database file
 	tempDB := t.TempDir() + "/test.db"

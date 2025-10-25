@@ -409,3 +409,132 @@ func TestNormalizeTag(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractTextFromImage(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseText   string
+		expectedText   string
+		expectError    bool
+		statusCode     int
+	}{
+		{
+			name:         "successful text extraction",
+			responseText: "This is extracted text from the image",
+			expectedText: "This is extracted text from the image",
+			expectError:  false,
+			statusCode:   http.StatusOK,
+		},
+		{
+			name:         "empty image (no text)",
+			responseText: "",
+			expectedText: "",
+			expectError:  false,
+			statusCode:   http.StatusOK,
+		},
+		{
+			name:         "text with leading/trailing whitespace",
+			responseText: "  \n\n  Text with whitespace  \n  ",
+			expectedText: "Text with whitespace",
+			expectError:  false,
+			statusCode:   http.StatusOK,
+		},
+		{
+			name:         "multiline text extraction",
+			responseText: "Line 1\nLine 2\nLine 3",
+			expectedText: "Line 1\nLine 2\nLine 3",
+			expectError:  false,
+			statusCode:   http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Verify it's a vision request with images
+				var req models.OllamaVisionRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Errorf("Failed to decode vision request: %v", err)
+				}
+
+				if len(req.Images) == 0 {
+					t.Error("Expected images in request")
+				}
+
+				// Verify prompt contains OCR instructions
+				if req.Prompt == "" {
+					t.Error("Expected non-empty prompt")
+				}
+
+				// Return response
+				resp := models.OllamaResponse{
+					Response: tt.responseText,
+					Done:     true,
+				}
+				w.WriteHeader(tt.statusCode)
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer server.Close()
+
+			client := NewClient(server.URL, "test-model")
+			ctx := context.Background()
+
+			imageData := []byte("fake image data for OCR test")
+			result, err := client.ExtractTextFromImage(ctx, imageData)
+
+			if tt.expectError && err == nil {
+				t.Error("Expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if result != tt.expectedText {
+				t.Errorf("Expected extracted text %q, got %q", tt.expectedText, result)
+			}
+		})
+	}
+}
+
+func TestExtractTextFromImageError(t *testing.T) {
+	// Create a test server that returns an error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Vision model error"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-model")
+	ctx := context.Background()
+
+	imageData := []byte("fake image data")
+	_, err := client.ExtractTextFromImage(ctx, imageData)
+
+	if err == nil {
+		t.Error("Expected error from vision model failure, got nil")
+	}
+}
+
+func TestExtractTextFromImageContextCancellation(t *testing.T) {
+	// Create a test server that delays
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		resp := models.OllamaResponse{
+			Response: "Too late",
+			Done:     true,
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-model")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	imageData := []byte("fake image data")
+	_, err := client.ExtractTextFromImage(ctx, imageData)
+
+	if err == nil {
+		t.Error("Expected timeout error, got nil")
+	}
+}

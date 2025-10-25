@@ -131,6 +131,16 @@ func (s *Scraper) releaseOllamaSlot() {
 	<-s.ollamaSemaphore
 }
 
+// Config returns the scraper configuration
+func (s *Scraper) Config() Config {
+	return s.config
+}
+
+// OllamaClient returns the Ollama client for external use
+func (s *Scraper) OllamaClient() *ollama.Client {
+	return s.ollamaClient
+}
+
 // Scrape fetches and processes a URL
 func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.ScrapedData, error) {
 	start := time.Now()
@@ -1376,6 +1386,19 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 		img.Summary = summary
 		img.Tags = tags
 
+		// Extract text from image using OCR (with semaphore protection)
+		if err := s.acquireOllamaSlot(ctx); err == nil {
+			extractedText, err := s.ollamaClient.ExtractTextFromImage(ctx, imageData)
+			s.releaseOllamaSlot()
+			if err != nil {
+				log.Printf("Failed to extract text from image %s: %v", img.URL, err)
+				// Don't return error, OCR failure is not critical
+			} else if extractedText != "" {
+				img.ExtractedText = extractedText
+				log.Printf("Extracted %d characters of text from image %s", len(extractedText), img.URL)
+			}
+		}
+
 		// Check if image contains an infographic and add "banner" tag
 		if isInfographic(summary, tags) {
 			// Check if "banner" tag doesn't already exist
@@ -1392,8 +1415,8 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 			}
 		}
 
-		log.Printf("Successfully analyzed image %s (summary: %d chars, tags: %d)",
-			img.URL, len(summary), len(tags))
+		log.Printf("Successfully analyzed image %s (summary: %d chars, tags: %d, extracted_text: %d chars)",
+			img.URL, len(summary), len(tags), len(img.ExtractedText))
 		return img, nil, ""
 	}
 
@@ -2144,6 +2167,47 @@ func scoreContentFallback(targetURL, title, content string) (score float64, reas
 	if wordCount < 20 {
 		score -= 0.2
 		categories = append(categories, "minimal-content")
+	}
+
+	// Check for bullet point lists and sparse content
+	lines := strings.Split(content, "\n")
+	nonEmptyLines := 0
+	bulletLines := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			nonEmptyLines++
+			// Check if line starts with bullet point markers
+			if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "•") ||
+				strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "◦") ||
+				(len(trimmed) > 2 && trimmed[0] >= '0' && trimmed[0] <= '9' && (trimmed[1] == '.' || trimmed[1] == ')')) {
+				bulletLines++
+			}
+		}
+	}
+
+	// If more than 60% of non-empty lines are bullet points, it's likely a sparse list
+	if nonEmptyLines > 5 && bulletLines > 0 {
+		bulletRatio := float64(bulletLines) / float64(nonEmptyLines)
+		if bulletRatio > 0.6 {
+			score -= 0.3
+			reasons = append(reasons, "Content is primarily bullet points/list items")
+			categories = append(categories, "sparse-content", "low-quality")
+		} else if bulletRatio > 0.4 {
+			score -= 0.15
+			reasons = append(reasons, "Content contains many bullet points")
+		}
+	}
+
+	// Check for excessive whitespace/newlines (sparse content)
+	// If average line length is very short, content is likely sparse
+	if nonEmptyLines > 10 {
+		avgLineLength := float64(contentLength) / float64(nonEmptyLines)
+		if avgLineLength < 30 {
+			score -= 0.2
+			reasons = append(reasons, "Content has very short lines (sparse layout)")
+			categories = append(categories, "sparse-content")
+		}
 	}
 
 	// Check for spam indicators

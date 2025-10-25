@@ -28,6 +28,7 @@ type ImageInfo struct {
 	AltText            string     `json:"alt_text"`
 	Summary            string     `json:"summary"`
 	Tags               []string   `json:"tags"`
+	ExtractedText      string     `json:"extracted_text,omitempty"` // OCR extracted text from image
 	Base64Data         string     `json:"base64_data,omitempty"` // Base64 encoded image data (deprecated, use FilePath)
 	FilePath           string     `json:"file_path,omitempty"` // Filesystem path to image
 	Slug               string     `json:"slug,omitempty"` // SEO-friendly URL slug
