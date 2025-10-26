@@ -34,7 +34,7 @@ func main() {
 	logger.Info("scraper service initializing", "version", "1.0.0")
 
 	// Initialize tracing
-	tp, err := tracing.InitTracer("purpletab-scraper")
+	tp, err := tracing.InitTracer("docutab-scraper")
 	if err != nil {
 		logger.Warn("failed to initialize tracer, continuing without tracing", "error", err)
 	} else {
