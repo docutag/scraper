@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	exif "github.com/rwcarlsen/goexif/exif"
 	_ "golang.org/x/image/webp"
-	"github.com/zombar/purpletab/pkg/metrics"
 	"github.com/zombar/purpletab/pkg/tracing"
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/db"
@@ -40,8 +40,6 @@ type Server struct {
 	server      *http.Server
 	mux         *http.ServeMux
 	corsEnabled bool
-	httpMetrics *metrics.HTTPMetrics
-	dbMetrics   *metrics.DatabaseMetrics
 }
 
 // Config contains server configuration
@@ -82,10 +80,6 @@ func NewServer(config Config) (*Server, error) {
 	// Initialize scraper with database and storage
 	scraperInstance := scraper.New(config.ScraperConfig, database, storageInstance)
 
-	// Initialize Prometheus metrics
-	httpMetrics := metrics.NewHTTPMetrics("scraper")
-	dbMetrics := metrics.NewDatabaseMetrics("scraper")
-
 	s := &Server{
 		db:          database,
 		scraper:     scraperInstance,
@@ -93,18 +87,7 @@ func NewServer(config Config) (*Server, error) {
 		addr:        config.Addr,
 		mux:         http.NewServeMux(),
 		corsEnabled: config.CORSEnabled,
-		httpMetrics: httpMetrics,
-		dbMetrics:   dbMetrics,
 	}
-
-	// Start periodic database stats collection
-	go func() {
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			dbMetrics.UpdateDBStats(database.DB())
-		}
-	}()
 
 	// Register routes
 	s.registerRoutes()
@@ -112,12 +95,10 @@ func NewServer(config Config) (*Server, error) {
 	// Get logger for HTTP middleware
 	logger := slog.Default()
 
-	// Create HTTP server with middleware chain: metrics -> HTTP logging -> tracing -> CORS -> handlers
-	httpHandler := httpMetrics.HTTPMiddleware(
-		logging.HTTPLoggingMiddleware(logger)(
-			tracing.HTTPMiddleware("scraper")(
-				s.middleware(s.mux),
-			),
+	// Create HTTP server with middleware chain: HTTP logging -> tracing -> CORS -> handlers
+	httpHandler := logging.HTTPLoggingMiddleware(logger)(
+		tracing.HTTPMiddleware("scraper")(
+			s.middleware(s.mux),
 		),
 	)
 
@@ -134,7 +115,7 @@ func NewServer(config Config) (*Server, error) {
 
 // registerRoutes sets up all API routes
 func (s *Server) registerRoutes() {
-	s.mux.Handle("/metrics", metrics.Handler()) // Prometheus metrics endpoint
+	s.mux.Handle("/metrics", promhttp.Handler()) // Prometheus metrics endpoint
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/scrape", s.handleScrape)
 	s.mux.HandleFunc("/api/process-image", s.handleProcessImage) // Handles image upload and processing
@@ -146,6 +127,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/images/", s.handleImage) // Handles /api/images/{id} and /api/images/{id}/file
 	s.mux.HandleFunc("/api/scrapes/", s.handleScrapeImages) // Handles /api/scrapes/{id}/images and /api/scrapes/{id}/content
 	s.mux.HandleFunc("/images/", s.handleImageBySlug) // Serves images by slug for SEO static pages
+}
+
+// DB returns the database instance for metrics collection
+func (s *Server) DB() *db.DB {
+	return s.db
 }
 
 // Start starts the API server

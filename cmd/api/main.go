@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zombar/purpletab/pkg/metrics"
 	"github.com/zombar/purpletab/pkg/tracing"
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/api"
@@ -121,6 +122,17 @@ func main() {
 		logger.Error("failed to create server", "error", err)
 		os.Exit(1)
 	}
+
+	// Initialize database metrics
+	dbMetrics := metrics.NewDatabaseMetrics("scraper")
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			dbMetrics.UpdateDBStats(server.DB().DB())
+		}
+	}()
+	logger.Info("database metrics initialized")
 
 	// Start server in a goroutine
 	go func() {
