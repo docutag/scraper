@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/db"
 	"github.com/zombar/scraper/models"
+	"github.com/zombar/scraper/pkg/logging"
 	"github.com/zombar/scraper/slug"
 	"github.com/zombar/scraper/storage"
 	"go.opentelemetry.io/otel/attribute"
@@ -107,10 +109,15 @@ func NewServer(config Config) (*Server, error) {
 	// Register routes
 	s.registerRoutes()
 
-	// Create HTTP server with middleware chain: metrics -> tracing -> CORS -> handlers
+	// Get logger for HTTP middleware
+	logger := slog.Default()
+
+	// Create HTTP server with middleware chain: metrics -> HTTP logging -> tracing -> CORS -> handlers
 	httpHandler := httpMetrics.HTTPMiddleware(
-		tracing.HTTPMiddleware("scraper")(
-			s.middleware(s.mux),
+		logging.HTTPLoggingMiddleware(logger)(
+			tracing.HTTPMiddleware("scraper")(
+				s.middleware(s.mux),
+			),
 		),
 	)
 
