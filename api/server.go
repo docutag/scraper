@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	exif "github.com/rwcarlsen/goexif/exif"
 	_ "golang.org/x/image/webp"
+	"github.com/zombar/purpletab/pkg/metrics"
 	"github.com/zombar/purpletab/pkg/tracing"
 	"github.com/zombar/scraper"
 	"github.com/zombar/scraper/db"
@@ -95,10 +96,12 @@ func NewServer(config Config) (*Server, error) {
 	// Get logger for HTTP middleware
 	logger := slog.Default()
 
-	// Create HTTP server with middleware chain: HTTP logging -> tracing -> CORS -> handlers
+	// Create HTTP server with middleware chain: HTTP logging -> metrics -> tracing -> CORS -> handlers
 	httpHandler := logging.HTTPLoggingMiddleware(logger)(
-		tracing.HTTPMiddleware("scraper")(
-			s.middleware(s.mux),
+		metrics.HTTPMiddleware("scraper")(
+			tracing.HTTPMiddleware("scraper")(
+				s.middleware(s.mux),
+			),
 		),
 	)
 
