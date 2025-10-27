@@ -91,14 +91,22 @@ func NewServer(config Config) (*Server, error) {
 	// Get logger for HTTP middleware
 	logger := slog.Default()
 
-	// Create HTTP server with middleware chain: HTTP logging -> metrics -> tracing -> CORS -> handlers
-	httpHandler := logging.HTTPLoggingMiddleware(logger)(
-		metrics.HTTPMiddleware("scraper")(
-			tracing.HTTPMiddleware("scraper")(
-				s.middleware(s.mux),
-			),
-		),
-	)
+	// Setup server with middleware chain (applied bottom-up, executes top-down):
+	// Execution order: CORS -> tracing -> metrics -> logging -> handlers
+	// This ensures tracing creates span BEFORE logging tries to read trace context
+	var httpHandler http.Handler = s.mux
+
+	// Add HTTP request logging (innermost, executes last)
+	httpHandler = logging.HTTPLoggingMiddleware(logger)(httpHandler)
+
+	// Add HTTP metrics middleware
+	httpHandler = metrics.HTTPMiddleware("scraper")(httpHandler)
+
+	// Wrap with tracing middleware (executes early to create span)
+	httpHandler = tracing.HTTPMiddleware("scraper")(httpHandler)
+
+	// Apply CORS and custom middleware (outermost, executes first)
+	httpHandler = s.middleware(httpHandler)
 
 	s.server = &http.Server{
 		Addr:         config.Addr,
