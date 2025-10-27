@@ -128,7 +128,7 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 
 		imageQuery := `
 			INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		`
 
 		_, err = tx.Exec(
