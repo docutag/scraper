@@ -3,7 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 )
 
@@ -157,19 +157,19 @@ var postgresMigrations = []Migration{
 
 // MigratePostgres runs all pending PostgreSQL migrations
 func MigratePostgres(db *sql.DB) error {
-	log.Println("Creating schema_migrations table...")
+	slog.Default().Info("creating schema_migrations table")
 	// Ensure migrations table exists
 	if err := ensureMigrationsTablePostgres(db); err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
 	}
 
-	log.Println("Checking current schema version...")
+	slog.Default().Info("checking current schema version")
 	// Get current version
 	currentVersion, err := getCurrentVersionPostgres(db)
 	if err != nil {
 		return fmt.Errorf("failed to get current version: %w", err)
 	}
-	log.Printf("Current schema version: %d", currentVersion)
+	slog.Default().Info("current schema version", "version", currentVersion)
 
 	// Sort migrations by version
 	sortedMigrations := make([]Migration, len(postgresMigrations))
@@ -181,7 +181,7 @@ func MigratePostgres(db *sql.DB) error {
 	// Run pending migrations
 	for _, m := range sortedMigrations {
 		if m.Version <= currentVersion {
-			log.Printf("Skipping migration %d (already applied)", m.Version)
+			slog.Default().Debug("skipping migration (already applied)", "version", m.Version)
 			continue
 		}
 
@@ -190,7 +190,7 @@ func MigratePostgres(db *sql.DB) error {
 		}
 	}
 
-	log.Println("All migrations complete")
+	slog.Default().Info("all migrations complete")
 	return nil
 }
 
@@ -218,7 +218,7 @@ func getCurrentVersionPostgres(db *sql.DB) (int, error) {
 
 // runMigrationPostgres executes a single migration with PostgreSQL placeholders
 func runMigrationPostgres(db *sql.DB, m Migration) error {
-	log.Printf("Applying migration %d: %s", m.Version, m.Name)
+	slog.Default().Info("applying migration", "version", m.Version, "name", m.Name)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -243,7 +243,7 @@ func runMigrationPostgres(db *sql.DB, m Migration) error {
 		return fmt.Errorf("failed to commit migration: %w", err)
 	}
 
-	log.Printf("✓ Applied migration %d: %s", m.Version, m.Name)
+	slog.Default().Info("migration applied successfully", "version", m.Version, "name", m.Name)
 	return nil
 }
 
