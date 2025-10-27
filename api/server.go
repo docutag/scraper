@@ -34,13 +34,14 @@ import (
 
 // Server represents the API server
 type Server struct {
-	db          *db.DB
-	scraper     *scraper.Scraper
-	storage     *storage.Storage
-	addr        string
-	server      *http.Server
-	mux         *http.ServeMux
-	corsEnabled bool
+	db              *db.DB
+	scraper         *scraper.Scraper
+	storage         *storage.Storage
+	addr            string
+	server          *http.Server
+	mux             *http.ServeMux
+	corsEnabled     bool
+	businessMetrics *metrics.BusinessMetrics
 }
 
 // Config contains server configuration
@@ -49,16 +50,6 @@ type Config struct {
 	DBConfig      db.Config
 	ScraperConfig scraper.Config
 	CORSEnabled   bool
-}
-
-// DefaultConfig returns default server configuration
-func DefaultConfig() Config {
-	return Config{
-		Addr:          ":8080",
-		DBConfig:      db.DefaultConfig(),
-		ScraperConfig: scraper.DefaultConfig(),
-		CORSEnabled:   true,
-	}
 }
 
 // NewServer creates a new API server
@@ -81,13 +72,17 @@ func NewServer(config Config) (*Server, error) {
 	// Initialize scraper with database and storage
 	scraperInstance := scraper.New(config.ScraperConfig, database, storageInstance)
 
+	// Initialize business metrics
+	businessMetrics := metrics.NewBusinessMetrics("scraper")
+
 	s := &Server{
-		db:          database,
-		scraper:     scraperInstance,
-		storage:     storageInstance,
-		addr:        config.Addr,
-		mux:         http.NewServeMux(),
-		corsEnabled: config.CORSEnabled,
+		db:              database,
+		scraper:         scraperInstance,
+		storage:         storageInstance,
+		addr:            config.Addr,
+		mux:             http.NewServeMux(),
+		corsEnabled:     config.CORSEnabled,
+		businessMetrics: businessMetrics,
 	}
 
 	// Register routes
@@ -270,13 +265,33 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		attribute.String("scrape.url", req.URL),
 		attribute.String("scrape.timeout", "10m"))
 
+	// Start metrics timer for scrape duration with exemplar support
+	startTime := time.Now()
+	var scrapeStatus string
+	defer func() {
+		if scrapeStatus != "" {
+			duration := time.Since(startTime).Seconds()
+			// Record duration with exemplar linking to trace ID
+			s.businessMetrics.ObserveDurationWithExemplar(ctx, s.businessMetrics.ScrapeDuration, duration, scrapeStatus)
+			s.businessMetrics.ScrapesCompletedTotal.WithLabelValues(scrapeStatus).Inc()
+		}
+	}()
+
 	result, err := s.scraper.Scrape(ctx, req.URL)
 	if err != nil {
+		scrapeStatus = "error"
 		tracing.RecordError(ctx, err)
 		scrapeSpan.End()
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("scraping failed: %v", err))
 		return
 	}
+
+	// Record successful scrape
+	scrapeStatus = "success"
+
+	// Record links and images extracted
+	s.businessMetrics.LinksExtractedTotal.Add(float64(len(result.Links)))
+	s.businessMetrics.ImagesProcessedTotal.Add(float64(len(result.Images)))
 
 	// Add scrape result metrics to span
 	scrapeSpan.SetAttributes(

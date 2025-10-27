@@ -534,25 +534,66 @@ func extractTextFromNode(n *html.Node) string {
 // extractText extracts all text content from the HTML
 func extractText(n *html.Node) string {
 	var buf strings.Builder
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.TextNode {
-			text := strings.TrimSpace(n.Data)
-			if text != "" {
-				buf.WriteString(text)
-				buf.WriteString(" ")
-			}
-		}
-		// Skip script and style tags
+
+	// Block-level elements that should add line breaks
+	blockElements := map[string]bool{
+		"p": true, "div": true, "br": true, "h1": true, "h2": true, "h3": true,
+		"h4": true, "h5": true, "h6": true, "li": true, "tr": true, "td": true,
+		"th": true, "article": true, "section": true, "blockquote": true,
+		"pre": true, "ul": true, "ol": true, "dl": true, "dt": true, "dd": true,
+		"header": true, "footer": true, "nav": true, "aside": true, "main": true,
+	}
+
+	var f func(*html.Node, bool)
+	f = func(n *html.Node, afterBlock bool) {
+		// Skip script and style tags entirely
 		if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style") {
 			return
 		}
+
+		if n.Type == html.TextNode {
+			text := strings.TrimSpace(n.Data)
+			if text != "" {
+				// Add space before text if buffer has content and doesn't end with whitespace
+				if buf.Len() > 0 {
+					lastChar := buf.String()[buf.Len()-1]
+					if lastChar != '\n' && lastChar != ' ' {
+						buf.WriteString(" ")
+					}
+				}
+				buf.WriteString(text)
+			}
+		}
+
+		// Process children
+		isBlockElement := n.Type == html.ElementNode && blockElements[n.Data]
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
+			f(c, isBlockElement)
+		}
+
+		// Add newline after block elements
+		if isBlockElement && buf.Len() > 0 {
+			// Avoid adding multiple consecutive newlines
+			str := buf.String()
+			if !strings.HasSuffix(str, "\n\n") {
+				if strings.HasSuffix(str, "\n") {
+					buf.WriteString("\n")
+				} else {
+					buf.WriteString("\n\n")
+				}
+			}
 		}
 	}
-	f(n)
-	return strings.TrimSpace(buf.String())
+
+	f(n, false)
+
+	// Clean up excessive newlines and trim
+	text := buf.String()
+	// Replace 3+ newlines with just 2 (preserve paragraph breaks but no more)
+	for strings.Contains(text, "\n\n\n") {
+		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(text)
 }
 
 // extractImages extracts image information from the HTML

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/lib/pq" // PostgreSQL driver
 	"github.com/zombar/purpletab/pkg/metrics"
 	"github.com/zombar/purpletab/pkg/tracing"
 	"github.com/zombar/scraper"
@@ -49,7 +51,6 @@ func main() {
 
 	// Default values
 	defaultPort := getEnv("PORT", "8080")
-	defaultDBPath := getEnv("DB_PATH", "scraper.db")
 	defaultStoragePath := getEnv("STORAGE_BASE_PATH", "./storage")
 	defaultOllamaURL := getEnv("OLLAMA_URL", "http://localhost:11434")
 	defaultOllamaModel := getEnv("OLLAMA_MODEL", "gpt-oss:20b")
@@ -85,7 +86,6 @@ func main() {
 
 	// Command-line flags (override environment variables)
 	port := flag.String("port", defaultPort, "Server port")
-	dbPath := flag.String("db", defaultDBPath, "Database file path")
 	ollamaURL := flag.String("ollama-url", defaultOllamaURL, "Ollama base URL")
 	ollamaModel := flag.String("ollama-model", defaultOllamaModel, "Ollama model to use for text generation")
 	ollamaVisionModel := flag.String("ollama-vision-model", defaultOllamaVisionModel, "Ollama model to use for vision tasks")
@@ -94,13 +94,27 @@ func main() {
 	disableImageAnalysis := flag.Bool("disable-image-analysis", false, "Disable AI-powered image analysis")
 	flag.Parse()
 
+	// PostgreSQL database configuration (required)
+	dbHost := getEnv("DB_HOST", "")
+	if dbHost == "" {
+		logger.Error("DB_HOST environment variable is required")
+		os.Exit(1)
+	}
+
+	dbPort := getEnv("DB_PORT", "5432")
+	dbUser := getEnv("DB_USER", "docutab")
+	dbPassword := getEnv("DB_PASSWORD", "docutab_dev_pass")
+	dbName := getEnv("DB_NAME", "docutab")
+
+	dbConfig := db.Config{
+		DSN: fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", dbHost, dbPort, dbUser, dbPassword, dbName),
+	}
+	logger.Info("using PostgreSQL database", "host", dbHost, "port", dbPort, "database", dbName)
+
 	// Create server configuration
 	config := api.Config{
-		Addr: ":" + *port,
-		DBConfig: db.Config{
-			Driver: "sqlite",
-			DSN:    *dbPath,
-		},
+		Addr:     ":" + *port,
+		DBConfig: dbConfig,
 		ScraperConfig: scraper.Config{
 			HTTPTimeout:         30 * time.Second,
 			OllamaBaseURL:       *ollamaURL,
@@ -138,7 +152,8 @@ func main() {
 	go func() {
 		logger.Info("scraper service starting",
 			"port", *port,
-			"database", *dbPath,
+			"database_host", dbHost,
+			"database_name", dbName,
 			"storage_path", defaultStoragePath,
 			"ollama_url", *ollamaURL,
 			"ollama_model", *ollamaModel,
