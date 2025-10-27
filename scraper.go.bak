@@ -205,13 +205,13 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		extractedContent, err := s.ollamaClient.ExtractContent(ctx, textContent)
 		s.releaseOllamaSlot()
 		if err != nil {
-			slog.Warn("ollama content extraction failed, using raw text", "url", targetURL, "error", err)
+			log.Printf("Ollama content extraction failed for %s, using raw text: %v", targetURL, err)
 			warnings = append(warnings, "AI content extraction unavailable, using raw text")
 		} else {
 			content = extractedContent
 		}
 	} else {
-		slog.Warn("context cancelled while waiting for ollama slot", "operation", "content_extraction", "error", err)
+		log.Printf("Context cancelled while waiting for Ollama slot for content extraction: %v", err)
 		warnings = append(warnings, "Content extraction timed out, using raw text")
 	}
 
@@ -290,7 +290,7 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		s.releaseOllamaSlot()
 		if err != nil {
 			// Fallback to rule-based scoring when Ollama fails
-			slog.Warn("ollama scoring failed, using rule-based fallback", "url", targetURL, "error", err)
+			log.Printf("Ollama scoring failed for %s, using rule-based fallback: %v", targetURL, err)
 			score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
 			aiUsed = false
 			warnings = append(warnings, "AI scoring unavailable, using rule-based scoring")
@@ -299,7 +299,7 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 		}
 	} else {
 		// Context cancelled, use rule-based fallback
-		slog.Warn("context cancelled while waiting for ollama slot", "operation", "scoring", "error", err)
+		log.Printf("Context cancelled while waiting for Ollama slot for scoring: %v", err)
 		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, content)
 		aiUsed = false
 		warnings = append(warnings, "Scoring timed out, using rule-based scoring")
@@ -340,12 +340,8 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 	if len(images) > 0 {
 		for i := range images {
 			images[i].RelevanceScore = scoreImageRelevance(images[i], i, len(images), title, categories)
-			slog.Info("image relevance score",
-				"index", i,
-				"score", images[i].RelevanceScore,
-				"width", images[i].Width,
-				"height", images[i].Height,
-				"tags", images[i].Tags)
+			log.Printf("Image %d relevance score: %.2f (dimensions: %dx%d, tags: %v)",
+				i, images[i].RelevanceScore, images[i].Width, images[i].Height, images[i].Tags)
 		}
 	}
 
@@ -389,7 +385,7 @@ func (s *Scraper) Scrape(ctx context.Context, targetURL string) (*models.Scraped
 
 		_, err := s.storage.SaveContent(htmlContent, contentSlug)
 		if err != nil {
-			slog.Error("failed to save content to filesystem", "url", targetURL, "error", err)
+			log.Printf("Failed to save content for %s to filesystem: %v", targetURL, err)
 			warnings = append(warnings, "Failed to save content to filesystem")
 			data.Warnings = warnings
 		}
@@ -447,12 +443,12 @@ func (s *Scraper) ExtractLinks(ctx context.Context, targetURL string) ([]string,
 		extractedContent, err := s.ollamaClient.ExtractContent(ctx, textContent)
 		s.releaseOllamaSlot()
 		if err != nil {
-			slog.Warn("ollama content extraction failed, using raw text", "url", targetURL, "error", err)
+			log.Printf("Ollama content extraction failed for %s, using raw text: %v", targetURL, err)
 		} else {
 			content = extractedContent
 		}
 	} else {
-		slog.Warn("context cancelled while waiting for ollama slot", "operation", "content_extraction", "error", err)
+		log.Printf("Context cancelled while waiting for Ollama slot for content extraction: %v", err)
 	}
 
 	// Extract links with Ollama sanitization and fallback
@@ -664,10 +660,8 @@ func (s *Scraper) extractLinksWithOllama(ctx context.Context, n *html.Node, base
 
 	// Pre-filter links using pattern matching before AI
 	filteredLinks, filteredCount := filterLowQualityLinks(allLinks)
-	slog.Info("link extraction complete",
-		"total_links", len(allLinks),
-		"filtered_out", filteredCount,
-		"remaining", len(filteredLinks))
+	log.Printf("Link extraction: found %d links, filtered out %d low-quality links, %d remaining",
+		len(allLinks), filteredCount, len(filteredLinks))
 
 	// If we have no links remaining, return early
 	if len(filteredLinks) == 0 {
@@ -679,10 +673,8 @@ func (s *Scraper) extractLinksWithOllama(ctx context.Context, n *html.Node, base
 	// 2. We filtered out at least 50% of the original links (meaning our patterns worked well)
 	// This ensures we still use AI when needed for intelligent filtering
 	if len(filteredLinks) <= 3 && filteredCount > 0 && float64(filteredCount)/float64(len(allLinks)) >= 0.5 {
-		slog.Info("skipping AI link extraction",
-			"clean_links", len(filteredLinks),
-			"skipped", filteredCount,
-			"total", len(allLinks))
+		log.Printf("Skipping AI for link extraction: %d clean links after filtering %d/%d links",
+			len(filteredLinks), filteredCount, len(allLinks))
 		return filteredLinks
 	}
 
@@ -739,7 +731,7 @@ Format: ["url1", "url2", "url3"]`,
 		s.releaseOllamaSlot()
 		if err != nil {
 			// If Ollama fails, fall back to returning filtered links
-			slog.Warn("ollama link sanitization failed, using filtered links", "error", err)
+			log.Printf("Ollama link sanitization failed, returning filtered links: %v", err)
 		} else {
 			// Strip markdown code blocks if present
 			cleanedResponse := ollama.StripMarkdownCodeBlocks(response)
@@ -748,15 +740,15 @@ Format: ["url1", "url2", "url3"]`,
 			var parsedLinks []string
 			if err := json.Unmarshal([]byte(cleanedResponse), &parsedLinks); err != nil {
 				// If parsing fails, fall back to returning filtered links
-				slog.Warn("failed to parse ollama link response", "error", err)
-				slog.Warn("ollama response", "response", response)
+				log.Printf("Failed to parse Ollama link response, returning filtered links: %v", err)
+				log.Printf("Response was: %s", response)
 			} else if parsedLinks != nil {
 				sanitizedLinks = parsedLinks
-				slog.Info("AI refined links", "before", len(filteredLinks), "after", len(sanitizedLinks))
+				log.Printf("AI refined links from %d to %d", len(filteredLinks), len(sanitizedLinks))
 			}
 		}
 	} else {
-		slog.Warn("context cancelled while waiting for ollama slot", "operation", "link_sanitization", "error", err)
+		log.Printf("Context cancelled while waiting for Ollama slot for link sanitization: %v", err)
 	}
 
 	// Ensure we never return nil
@@ -1204,7 +1196,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 	existingRefs := []models.ExistingImageRef{}
 
 	if !s.config.EnableImageAnalysis {
-		slog.Info("image analysis disabled", "image_count", len(images))
+		log.Printf("Image analysis disabled, returning %d images without analysis", len(images))
 		return images, existingRefs, warnings
 	}
 
@@ -1217,7 +1209,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 	skippedCount := 0
 	for _, img := range images {
 		if shouldSkipImage(img.URL) {
-			slog.Info("skipping junk image", "url", img.URL)
+			log.Printf("Skipping junk image: %s", img.URL)
 			skippedCount++
 		} else {
 			filteredImages = append(filteredImages, img)
@@ -1225,13 +1217,13 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 	}
 
 	if skippedCount > 0 {
-		slog.Info("filtered out junk images", "count", skippedCount)
+		log.Printf("Filtered out %d junk images (placeholder/temp/UI components)", skippedCount)
 		warnings = append(warnings, fmt.Sprintf("Skipped %d placeholder/temp/UI component images", skippedCount))
 	}
 
 	// If all images were filtered out, return early
 	if len(filteredImages) == 0 {
-		slog.Info("all images filtered as junk", "count", len(images))
+		log.Printf("All %d images were filtered out as junk", len(images))
 		return []models.ImageInfo{}, existingRefs, warnings
 	}
 
@@ -1260,7 +1252,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 			return i < j
 		})
 
-		slog.Info("sorted and limited images", "total", len(images), "max_images", s.config.MaxImages)
+		log.Printf("Sorted %d images by size, limiting to top %d largest (MAX_IMAGES=%d)", len(images), s.config.MaxImages, s.config.MaxImages)
 		warnings = append(warnings, fmt.Sprintf("Limited to %d largest images (found %d total)", s.config.MaxImages, len(images)))
 		images = images[:s.config.MaxImages]
 	}
@@ -1322,7 +1314,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 		if result.existingRef != nil {
 			// Image already exists in database, add reference
 			existingRefs = append(existingRefs, *result.existingRef)
-			slog.Info("skipped existing image", "url", result.existingRef.ImageURL, "id", result.existingRef.ImageID)
+			log.Printf("Skipped downloading existing image %s (ID: %s)", result.existingRef.ImageURL, result.existingRef.ImageID)
 		} else {
 			// New image, add to processed list
 			processedImages = append(processedImages, result.img)
@@ -1339,7 +1331,7 @@ func (s *Scraper) processImages(ctx context.Context, images []models.ImageInfo) 
 
 	// Add info about deduplicated images
 	if len(existingRefs) > 0 {
-		slog.Info("found existing images", "count", len(existingRefs))
+		log.Printf("Found %d existing images (not re-downloaded)", len(existingRefs))
 	}
 
 	return processedImages, existingRefs, warnings
@@ -1354,7 +1346,7 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 	if s.db != nil {
 		existingImage, err := s.db.GetImageByURL(img.URL)
 		if err != nil {
-			slog.Error("failed to check for existing image", "url", img.URL, "error", err)
+			log.Printf("Error checking for existing image %s: %v", img.URL, err)
 			// Continue with download despite error
 		} else if existingImage != nil {
 			// Image already exists, return reference
@@ -1372,11 +1364,11 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 	// Download the image
 	imageData, contentType, err := s.downloadImage(ctx, img.URL)
 	if err != nil {
-		slog.Error("failed to download image", "url", img.URL, "error", err)
+		log.Printf("Failed to download image %s: %v", img.URL, err)
 		return img, nil, "download_failed"
 	}
 
-	slog.Info("downloaded image", "url", img.URL, "size_bytes", len(imageData))
+	log.Printf("Downloaded image %s (%d bytes)", img.URL, len(imageData))
 
 	// Generate slug from image info
 	img.Slug = slug.FromImageInfo(img.AltText, img.URL)
@@ -1388,12 +1380,12 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 	if s.storage != nil {
 		filePath, err := s.storage.SaveImage(imageData, img.Slug, contentType)
 		if err != nil {
-			slog.Error("failed to save image to filesystem", "url", img.URL, "error", err)
+			log.Printf("Failed to save image %s to filesystem: %v", img.URL, err)
 			// Fall back to base64 if filesystem storage fails
 			img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
 		} else {
 			img.FilePath = filePath
-			slog.Info("saved image to filesystem", "url", img.URL, "path", filePath)
+			log.Printf("Saved image %s to %s", img.URL, filePath)
 		}
 	} else {
 		// No storage configured, use base64 for backward compatibility
@@ -1407,22 +1399,19 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 	// Extract image dimensions
 	width, height, err := getImageDimensions(imageData)
 	if err != nil {
-		slog.Warn("failed to get image dimensions", "url", img.URL, "error", err)
+		log.Printf("Failed to get dimensions for image %s: %v", img.URL, err)
 		// Don't fail the entire operation, just leave dimensions empty
 	} else {
 		img.Width = width
 		img.Height = height
-		slog.Info("extracted image dimensions", "url", img.URL, "width", width, "height", height)
+		log.Printf("Image %s dimensions: %dx%d", img.URL, width, height)
 	}
 
 	// Extract EXIF metadata
 	if exifData := extractEXIF(imageData); exifData != nil {
 		img.EXIF = exifData
-		slog.Info("extracted EXIF data",
-			"url", img.URL,
-			"make", exifData.Make,
-			"model", exifData.Model,
-			"has_gps", exifData.GPS != nil)
+		log.Printf("Extracted EXIF data for image %s (Make: %s, Model: %s, GPS: %v)",
+			img.URL, exifData.Make, exifData.Model, exifData.GPS != nil)
 	}
 
 	// Analyze the image with Ollama (with semaphore protection)
@@ -1430,7 +1419,7 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 		summary, tags, err := s.ollamaClient.AnalyzeImage(ctx, imageData, img.AltText)
 		s.releaseOllamaSlot()
 		if err != nil {
-			slog.Error("failed to analyze image", "url", img.URL, "error", err)
+			log.Printf("Failed to analyze image %s: %v", img.URL, err)
 			return img, nil, "analysis_failed"
 		}
 
@@ -1443,11 +1432,11 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 			extractedText, err := s.ollamaClient.ExtractTextFromImage(ctx, imageData)
 			s.releaseOllamaSlot()
 			if err != nil {
-				slog.Warn("failed to extract text from image", "url", img.URL, "error", err)
+				log.Printf("Failed to extract text from image %s: %v", img.URL, err)
 				// Don't return error, OCR failure is not critical
 			} else if extractedText != "" {
 				img.ExtractedText = extractedText
-				slog.Info("extracted text from image", "url", img.URL, "text_length", len(extractedText))
+				log.Printf("Extracted %d characters of text from image %s", len(extractedText), img.URL)
 			}
 		}
 
@@ -1463,19 +1452,16 @@ func (s *Scraper) processSingleImage(ctx context.Context, img models.ImageInfo) 
 			}
 			if !hasBanner {
 				img.Tags = append(img.Tags, "banner")
-				slog.Info("detected infographic, added banner tag", "url", img.URL)
+				log.Printf("Detected infographic in image %s, added 'banner' tag", img.URL)
 			}
 		}
 
-		slog.Info("successfully analyzed image",
-			"url", img.URL,
-			"summary_length", len(summary),
-			"tag_count", len(tags),
-			"extracted_text_length", len(img.ExtractedText))
+		log.Printf("Successfully analyzed image %s (summary: %d chars, tags: %d, extracted_text: %d chars)",
+			img.URL, len(summary), len(tags), len(img.ExtractedText))
 		return img, nil, ""
 	}
 
-	slog.Warn("context cancelled while waiting for ollama slot", "operation", "image_analysis", "url", img.URL, "error", err)
+	log.Printf("Context cancelled while waiting for Ollama slot for image %s: %v", img.URL, err)
 	return img, nil, "analysis_timeout"
 }
 
@@ -1615,7 +1601,7 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 		s.releaseOllamaSlot()
 		if err != nil {
 			// Fallback to rule-based scoring when Ollama fails
-			slog.Warn("ollama scoring failed, using rule-based fallback", "url", targetURL, "error", err)
+			log.Printf("Ollama scoring failed, using rule-based fallback: %v", err)
 			score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, textContent)
 			aiUsed = false
 		} else {
@@ -1623,7 +1609,7 @@ func (s *Scraper) ScoreLinkContent(ctx context.Context, targetURL string) (*mode
 		}
 	} else {
 		// Context cancelled, use rule-based fallback
-		slog.Warn("context cancelled while waiting for ollama slot", "operation", "scoring", "error", err)
+		log.Printf("Context cancelled while waiting for Ollama slot for scoring: %v", err)
 		score, reason, categories, maliciousIndicators = scoreContentFallback(targetURL, title, textContent)
 		aiUsed = false
 	}

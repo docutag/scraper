@@ -11,7 +11,6 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -142,13 +141,13 @@ func (s *Server) DB() *db.DB {
 
 // Start starts the API server
 func (s *Server) Start() error {
-	log.Printf("Starting API server on %s", s.addr)
+	slog.Info("starting API server", "addr", s.addr)
 	return s.server.ListenAndServe()
 }
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
-	log.Println("Shutting down API server...")
+	slog.Info("shutting down API server")
 	if err := s.server.Shutdown(ctx); err != nil {
 		return err
 	}
@@ -170,17 +169,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Logging (skip health checks to reduce noise)
-		start := time.Now()
-		if r.URL.Path != "/health" {
-			log.Printf("%s %s", r.Method, r.URL.Path)
-		}
-
+		// HTTP logging is handled by HTTPLoggingMiddleware
 		next.ServeHTTP(w, r)
-
-		if r.URL.Path != "/health" {
-			log.Printf("%s %s - completed in %v", r.Method, r.URL.Path, time.Since(start))
-		}
 	})
 }
 
@@ -317,7 +307,7 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("db.images", len(result.Images)))
 
 	if err := s.db.SaveScrapedData(result); err != nil {
-		log.Printf("Failed to save data: %v", err)
+		slog.Error("failed to save scraped data", "error", err, "uuid", result.ID)
 		tracing.RecordError(ctx, err)
 		// Still return the result even if save fails
 	} else {
@@ -658,7 +648,7 @@ func (s *Server) handleImageBySlug(w http.ResponseWriter, r *http.Request) {
 	// Look up image by slug
 	image, err := s.db.GetImageBySlug(slug)
 	if err != nil {
-		log.Printf("Error getting image by slug %s: %v", slug, err)
+		slog.Error("failed to get image by slug", "slug", slug, "error", err)
 		respondError(w, http.StatusInternalServerError, "database error")
 		return
 	}
@@ -682,7 +672,7 @@ func (s *Server) handleImageBySlug(w http.ResponseWriter, r *http.Request) {
 
 	imageData, err := s.storage.ReadImage(image.FilePath)
 	if err != nil {
-		log.Printf("Error reading image file %s: %v", image.FilePath, err)
+		slog.Error("failed to read image file", "file_path", image.FilePath, "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to read image file")
 		return
 	}
@@ -729,7 +719,7 @@ func (s *Server) handleServeImageFile(w http.ResponseWriter, r *http.Request, id
 	// Read image from storage
 	imageData, err := s.storage.ReadImage(image.FilePath)
 	if err != nil {
-		log.Printf("Failed to read image file %s: %v", image.FilePath, err)
+		slog.Error("failed to read image file from storage", "file_path", image.FilePath, "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to read image file")
 		return
 	}
@@ -925,7 +915,7 @@ func (s *Server) handleProcessImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Processing uploaded image: %s (%d bytes)", header.Filename, len(imageData))
+	slog.Info("processing uploaded image", "filename", header.Filename, "size_bytes", len(imageData))
 
 	// Generate UUID for the image
 	imageID := uuid.New().String()
@@ -957,12 +947,12 @@ func (s *Server) handleProcessImage(w http.ResponseWriter, r *http.Request) {
 	if s.storage != nil {
 		filePath, err := s.storage.SaveImage(imageData, img.Slug, contentType)
 		if err != nil {
-			log.Printf("Failed to save uploaded image to filesystem: %v", err)
+			slog.Error("failed to save uploaded image to filesystem", "error", err, "slug", img.Slug)
 			respondError(w, http.StatusInternalServerError, "failed to save image")
 			return
 		}
 		img.FilePath = filePath
-		log.Printf("Saved uploaded image to %s", filePath)
+		slog.Info("saved uploaded image to filesystem", "file_path", filePath, "slug", img.Slug)
 	} else {
 		// Fallback to base64 if no storage configured
 		img.Base64Data = base64.StdEncoding.EncodeToString(imageData)
@@ -971,17 +961,17 @@ func (s *Server) handleProcessImage(w http.ResponseWriter, r *http.Request) {
 	// Extract image dimensions
 	width, height, err := getImageDimensions(imageData)
 	if err != nil {
-		log.Printf("Failed to get dimensions for uploaded image: %v", err)
+		slog.Warn("failed to get dimensions for uploaded image", "error", err)
 	} else {
 		img.Width = width
 		img.Height = height
-		log.Printf("Uploaded image dimensions: %dx%d", width, height)
+		slog.Info("extracted image dimensions", "width", width, "height", height)
 	}
 
 	// Extract EXIF metadata
 	if exifData := extractEXIF(imageData); exifData != nil {
 		img.EXIF = exifData
-		log.Printf("Extracted EXIF data from uploaded image")
+		slog.Info("extracted EXIF data from uploaded image")
 	}
 
 	// Process image with AI: analyze and extract text
@@ -991,22 +981,22 @@ func (s *Server) handleProcessImage(w http.ResponseWriter, r *http.Request) {
 	// Analyze the image with Ollama
 	summary, tags, err := s.scraper.OllamaClient().AnalyzeImage(ctx, imageData, "")
 	if err != nil {
-		log.Printf("Failed to analyze uploaded image: %v", err)
+		slog.Error("failed to analyze uploaded image", "error", err)
 		respondError(w, http.StatusInternalServerError, "failed to analyze image")
 		return
 	}
 	img.Summary = summary
 	img.Tags = tags
-	log.Printf("Analyzed uploaded image (summary: %d chars, tags: %d)", len(summary), len(tags))
+	slog.Info("analyzed uploaded image", "summary_chars", len(summary), "tag_count", len(tags))
 
 	// Extract text from image using OCR
 	extractedText, err := s.scraper.OllamaClient().ExtractTextFromImage(ctx, imageData)
 	if err != nil {
-		log.Printf("Failed to extract text from uploaded image: %v", err)
+		slog.Warn("failed to extract text from uploaded image", "error", err)
 		// OCR failure is not critical, continue without text
 	} else {
 		img.ExtractedText = extractedText
-		log.Printf("Extracted %d characters of text from uploaded image", len(extractedText))
+		slog.Info("extracted text from uploaded image", "text_length", len(extractedText))
 	}
 
 	// Auto-generate title from extracted text (use first 100 chars or summary)
@@ -1036,12 +1026,12 @@ func (s *Server) handleProcessImage(w http.ResponseWriter, r *http.Request) {
 	// Save image to database (without scrape_id since this is a standalone upload)
 	// We'll use empty string for scrape_id
 	if err := s.db.SaveImage(&img, ""); err != nil {
-		log.Printf("Failed to save uploaded image to database: %v", err)
+		slog.Error("failed to save uploaded image to database", "error", err, "image_id", imageID)
 		respondError(w, http.StatusInternalServerError, "failed to save image metadata")
 		return
 	}
 
-	log.Printf("Successfully processed uploaded image %s (ID: %s)", header.Filename, imageID)
+	slog.Info("successfully processed uploaded image", "filename", header.Filename, "image_id", imageID)
 
 	// Return response with image metadata
 	response := ProcessImageRequest{
