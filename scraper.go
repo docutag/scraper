@@ -27,6 +27,7 @@ import (
 	"github.com/zombar/scraper/models"
 	"github.com/zombar/scraper/ollama"
 	"github.com/zombar/scraper/slug"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/net/html"
 )
 
@@ -103,11 +104,18 @@ func New(config Config, db DB, storage Storage) *Scraper {
 		TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 	}
 
+	// Wrap transport with OpenTelemetry instrumentation for trace propagation
+	instrumentedTransport := otelhttp.NewTransport(transport,
+		otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
+			return "scraper HTTP " + r.Method + " " + r.URL.Host
+		}),
+	)
+
 	return &Scraper{
 		config: config,
 		httpClient: &http.Client{
 			Timeout:   config.HTTPTimeout,
-			Transport: transport,
+			Transport: instrumentedTransport,
 		},
 		ollamaClient:    ollama.NewClientWithVisionModel(config.OllamaBaseURL, config.OllamaModel, config.OllamaVisionModel),
 		ollamaSemaphore: make(chan struct{}, maxConcurrentOllamaRequests),
