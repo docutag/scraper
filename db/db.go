@@ -861,3 +861,32 @@ func (db *DB) UpdateImageTags(id string, tags []string) error {
 
 	return nil
 }
+
+// ImageStats contains statistics about images
+type ImageStats struct {
+	TotalStored      int   // Total images including tombstoned
+	TotalStorageSize int64 // Total storage size in bytes including tombstoned
+}
+
+// GetImageStats returns statistics about images for Prometheus metrics
+// Note: This counts ALL images including tombstoned ones for complete accounting.
+// Tombstoned images are scheduled for deletion but still consume storage until purged.
+func (db *DB) GetImageStats() (*ImageStats, error) {
+	stats := &ImageStats{}
+
+	// Count all images (including tombstoned - they still exist until purged)
+	countQuery := "SELECT COUNT(*) FROM images"
+	err := db.conn.QueryRow(countQuery).Scan(&stats.TotalStored)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count images: %w", err)
+	}
+
+	// Sum total storage size (including tombstoned - they still consume disk space)
+	sizeQuery := "SELECT COALESCE(SUM(file_size_bytes), 0) FROM images"
+	err = db.conn.QueryRow(sizeQuery).Scan(&stats.TotalStorageSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sum storage size: %w", err)
+	}
+
+	return stats, nil
+}

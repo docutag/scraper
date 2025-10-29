@@ -148,6 +148,16 @@ func main() {
 	}()
 	logger.Info("database metrics initialized")
 
+	// Initialize image metrics updater
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			server.UpdateImageMetrics()
+		}
+	}()
+	logger.Info("image metrics initialized")
+
 	// Start server in a goroutine
 	go func() {
 		logger.Info("scraper service starting",

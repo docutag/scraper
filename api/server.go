@@ -154,6 +154,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.db.Close()
 }
 
+// UpdateImageMetrics updates Prometheus gauge metrics for image statistics
+func (s *Server) UpdateImageMetrics() {
+	if s.businessMetrics.ImagesTotalStored == nil {
+		return
+	}
+
+	stats, err := s.db.GetImageStats()
+	if err != nil {
+		slog.Error("failed to get image stats", "error", err)
+		return
+	}
+
+	s.businessMetrics.ImagesTotalStored.Set(float64(stats.TotalStored))
+	s.businessMetrics.ImagesStorageBytes.Set(float64(stats.TotalStorageSize))
+}
+
 // middleware applies common middleware to all routes
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
