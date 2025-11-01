@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/zombar/scraper"
-	"github.com/zombar/scraper/db"
+	"github.com/docutag/scraper"
+	"github.com/docutag/scraper/db"
 )
 
 func setupTestServer(t *testing.T) (*Server, func()) {

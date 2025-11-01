@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zombar/scraper/models"
+	"github.com/docutag/scraper/models"
 )
 
 // TestTombstoneImagePersistence verifies that tombstone_datetime persists through various query paths

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zombar/scraper/models"
+	"github.com/docutag/scraper/models"
 )
 
 func TestNew(t *testing.T) {
