@@ -24,9 +24,9 @@ import (
 	"github.com/google/uuid"
 	exif "github.com/rwcarlsen/goexif/exif"
 	_ "golang.org/x/image/webp" // Register WebP format
-	"github.com/zombar/scraper/models"
-	"github.com/zombar/scraper/ollama"
-	"github.com/zombar/scraper/slug"
+	"github.com/docutag/scraper/models"
+	"github.com/docutag/scraper/ollama"
+	"github.com/docutag/scraper/slug"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/net/html"
 )

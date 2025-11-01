@@ -3,7 +3,7 @@ package scraper
 import (
 	"testing"
 
-	"github.com/zombar/scraper/models"
+	"github.com/docutag/scraper/models"
 )
 
 func TestScoreImageRelevance(t *testing.T) {

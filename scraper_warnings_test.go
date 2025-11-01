@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zombar/scraper/models"
+	"github.com/docutag/scraper/models"
 )
 
 // TestScrapeWithWarnings tests that warnings are properly populated when Ollama fails

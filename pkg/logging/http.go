@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zombar/purpletab/pkg/tracing"
+	"github.com/docutag/platform/pkg/tracing"
 )
 
 // responseWriter wraps http.ResponseWriter to capture status code

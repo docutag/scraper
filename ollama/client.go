@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zombar/scraper/models"
+	"github.com/docutag/scraper/models"
 )
 
 const (

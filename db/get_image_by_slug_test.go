@@ -3,7 +3,7 @@ package db
 import (
 	"testing"
 
-	"github.com/zombar/scraper/models"
+	"github.com/docutag/scraper/models"
 )
 
 func TestGetImageBySlug(t *testing.T) {
