@@ -39,7 +39,7 @@ func TestMigrations(t *testing.T) {
 
 	// Check that tables were created
 	var count int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM scraped_data").Scan(&count)
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM scraper_scraped_data").Scan(&count)
 	if err != nil {
 		t.Errorf("Failed to query scraped_data table: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestMigrations(t *testing.T) {
 		t.Errorf("Failed to query schema_migrations table: %v", err)
 	}
 
-	err = db.conn.QueryRow("SELECT COUNT(*) FROM images").Scan(&count)
+	err = db.conn.QueryRow("SELECT COUNT(*) FROM scraper_images").Scan(&count)
 	if err != nil {
 		t.Errorf("Failed to query images table: %v", err)
 	}

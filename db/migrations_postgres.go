@@ -12,43 +12,43 @@ import (
 var postgresMigrations = []Migration{
 	{
 		Version: 1,
-		Name:    "create_scraped_data_table",
+		Name:    "create_scraper_scraped_data_table",
 		Up: `
-			CREATE TABLE IF NOT EXISTS scraped_data (
+			CREATE TABLE IF NOT EXISTS scraper_scraped_data (
 				id TEXT PRIMARY KEY,
 				url TEXT NOT NULL UNIQUE,
 				data TEXT NOT NULL,
 				created_at TIMESTAMPTZ DEFAULT NOW(),
 				updated_at TIMESTAMPTZ DEFAULT NOW()
 			);
-			CREATE INDEX IF NOT EXISTS idx_scraped_data_url ON scraped_data(url);
-			CREATE INDEX IF NOT EXISTS idx_scraped_data_created_at ON scraped_data(created_at);
+			CREATE INDEX IF NOT EXISTS idx_scraper_scraped_data_url ON scraper_scraped_data(url);
+			CREATE INDEX IF NOT EXISTS idx_scraper_scraped_data_created_at ON scraper_scraped_data(created_at);
 		`,
 		Down: `
-			DROP INDEX IF EXISTS idx_scraped_data_created_at;
-			DROP INDEX IF EXISTS idx_scraped_data_url;
-			DROP TABLE IF EXISTS scraped_data;
+			DROP INDEX IF EXISTS idx_scraper_scraped_data_created_at;
+			DROP INDEX IF EXISTS idx_scraper_scraped_data_url;
+			DROP TABLE IF EXISTS scraper_scraped_data;
 		`,
 	},
 	{
 		Version: 2,
-		Name:    "create_schema_migrations_table",
+		Name:    "create_scraper_schema_version_table",
 		Up: `
-			CREATE TABLE IF NOT EXISTS schema_migrations (
+			CREATE TABLE IF NOT EXISTS scraper_schema_version (
 				version INTEGER PRIMARY KEY,
 				name TEXT NOT NULL,
 				applied_at TIMESTAMPTZ DEFAULT NOW()
 			);
 		`,
 		Down: `
-			DROP TABLE IF EXISTS schema_migrations;
+			DROP TABLE IF EXISTS scraper_schema_version;
 		`,
 	},
 	{
 		Version: 3,
 		Name:    "create_images_table",
 		Up: `
-			CREATE TABLE IF NOT EXISTS images (
+			CREATE TABLE IF NOT EXISTS scraper_images (
 				id TEXT PRIMARY KEY,
 				scrape_id TEXT NOT NULL,
 				url TEXT NOT NULL,
@@ -58,22 +58,22 @@ var postgresMigrations = []Migration{
 				base64_data TEXT,
 				created_at TIMESTAMPTZ DEFAULT NOW(),
 				updated_at TIMESTAMPTZ DEFAULT NOW(),
-				FOREIGN KEY (scrape_id) REFERENCES scraped_data(id) ON DELETE CASCADE
+				FOREIGN KEY (scrape_id) REFERENCES scraper_scraped_data(id) ON DELETE CASCADE
 			);
-			CREATE INDEX IF NOT EXISTS idx_images_scrape_id ON images(scrape_id);
-			CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at);
+			CREATE INDEX IF NOT EXISTS idx_images_scrape_id ON scraper_images(scrape_id);
+			CREATE INDEX IF NOT EXISTS idx_images_created_at ON scraper_images(created_at);
 		`,
 		Down: `
 			DROP INDEX IF EXISTS idx_images_created_at;
 			DROP INDEX IF EXISTS idx_images_scrape_id;
-			DROP TABLE IF EXISTS images;
+			DROP TABLE IF EXISTS scraper_images;
 		`,
 	},
 	{
 		Version: 4,
 		Name:    "add_images_url_index",
 		Up: `
-			CREATE INDEX IF NOT EXISTS idx_images_url ON images(url);
+			CREATE INDEX IF NOT EXISTS idx_images_url ON scraper_images(url);
 		`,
 		Down: `
 			DROP INDEX IF EXISTS idx_images_url;
@@ -83,81 +83,81 @@ var postgresMigrations = []Migration{
 		Version: 5,
 		Name:    "add_tombstone_datetime_to_images",
 		Up: `
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS tombstone_datetime TIMESTAMPTZ;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS tombstone_datetime TIMESTAMPTZ;
 		`,
 		Down: `
-			ALTER TABLE images DROP COLUMN IF EXISTS tombstone_datetime;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS tombstone_datetime;
 		`,
 	},
 	{
 		Version: 6,
 		Name:    "add_image_metadata_columns",
 		Up: `
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS width INTEGER;
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS height INTEGER;
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS file_size_bytes INTEGER;
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS content_type TEXT;
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS exif_data TEXT;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS width INTEGER;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS height INTEGER;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS file_size_bytes INTEGER;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS content_type TEXT;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS exif_data TEXT;
 		`,
 		Down: `
-			ALTER TABLE images DROP COLUMN IF EXISTS exif_data;
-			ALTER TABLE images DROP COLUMN IF EXISTS content_type;
-			ALTER TABLE images DROP COLUMN IF EXISTS file_size_bytes;
-			ALTER TABLE images DROP COLUMN IF EXISTS height;
-			ALTER TABLE images DROP COLUMN IF EXISTS width;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS exif_data;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS content_type;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS file_size_bytes;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS height;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS width;
 		`,
 	},
 	{
 		Version: 7,
 		Name:    "add_filesystem_and_slug_to_images",
 		Up: `
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS file_path TEXT;
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS slug TEXT;
-			CREATE INDEX IF NOT EXISTS idx_images_slug ON images(slug);
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS file_path TEXT;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS slug TEXT;
+			CREATE INDEX IF NOT EXISTS idx_images_slug ON scraper_images(slug);
 		`,
 		Down: `
 			DROP INDEX IF EXISTS idx_images_slug;
-			ALTER TABLE images DROP COLUMN IF EXISTS slug;
-			ALTER TABLE images DROP COLUMN IF EXISTS file_path;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS slug;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS file_path;
 		`,
 	},
 	{
 		Version: 8,
-		Name:    "add_slug_to_scraped_data",
+		Name:    "add_slug_to_scraper_scraped_data",
 		Up: `
-			ALTER TABLE scraped_data ADD COLUMN IF NOT EXISTS slug TEXT;
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_scraped_data_slug ON scraped_data(slug);
+			ALTER TABLE scraper_scraped_data ADD COLUMN IF NOT EXISTS slug TEXT;
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_scraper_scraped_data_slug ON scraper_scraped_data(slug);
 		`,
 		Down: `
-			DROP INDEX IF EXISTS idx_scraped_data_slug;
-			ALTER TABLE scraped_data DROP COLUMN IF EXISTS slug;
+			DROP INDEX IF EXISTS idx_scraper_scraped_data_slug;
+			ALTER TABLE scraper_scraped_data DROP COLUMN IF EXISTS slug;
 		`,
 	},
 	{
 		Version: 9,
 		Name:    "add_relevance_score_to_images",
 		Up: `
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS relevance_score REAL DEFAULT 0.5;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS relevance_score REAL DEFAULT 0.5;
 		`,
 		Down: `
-			ALTER TABLE images DROP COLUMN IF EXISTS relevance_score;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS relevance_score;
 		`,
 	},
 	{
 		Version: 10,
 		Name:    "add_extracted_text_to_images",
 		Up: `
-			ALTER TABLE images ADD COLUMN IF NOT EXISTS extracted_text TEXT;
+			ALTER TABLE scraper_images ADD COLUMN IF NOT EXISTS extracted_text TEXT;
 		`,
 		Down: `
-			ALTER TABLE images DROP COLUMN IF EXISTS extracted_text;
+			ALTER TABLE scraper_images DROP COLUMN IF EXISTS extracted_text;
 		`,
 	},
 }
 
 // MigratePostgres runs all pending PostgreSQL migrations
 func MigratePostgres(db *sql.DB) error {
-	slog.Default().Info("creating schema_migrations table")
+	slog.Default().Info("creating scraper_schema_version table")
 	// Ensure migrations table exists
 	if err := ensureMigrationsTablePostgres(db); err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
@@ -194,10 +194,10 @@ func MigratePostgres(db *sql.DB) error {
 	return nil
 }
 
-// ensureMigrationsTablePostgres creates the schema_migrations table if it doesn't exist
+// ensureMigrationsTablePostgres creates the scraper_schema_version table if it doesn't exist
 func ensureMigrationsTablePostgres(db *sql.DB) error {
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
+		CREATE TABLE IF NOT EXISTS scraper_schema_version (
 			version INTEGER PRIMARY KEY,
 			name TEXT NOT NULL,
 			applied_at TIMESTAMPTZ DEFAULT NOW()
@@ -209,7 +209,7 @@ func ensureMigrationsTablePostgres(db *sql.DB) error {
 // getCurrentVersionPostgres returns the current migration version
 func getCurrentVersionPostgres(db *sql.DB) (int, error) {
 	var version int
-	err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version)
+	err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM scraper_schema_version").Scan(&version)
 	if err != nil {
 		return 0, err
 	}
@@ -233,7 +233,7 @@ func runMigrationPostgres(db *sql.DB, m Migration) error {
 
 	// Record migration (use PostgreSQL $1, $2 placeholders instead of ?)
 	if _, err := tx.Exec(
-		"INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
+		"INSERT INTO scraper_schema_version (version, name) VALUES ($1, $2)",
 		m.Version, m.Name,
 	); err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
@@ -283,7 +283,7 @@ func RollbackPostgres(db *sql.DB) error {
 	}
 
 	// Remove migration record (use PostgreSQL $1 placeholder)
-	if _, err := tx.Exec("DELETE FROM schema_migrations WHERE version = $1", currentVersion); err != nil {
+	if _, err := tx.Exec("DELETE FROM scraper_schema_version WHERE version = $1", currentVersion); err != nil {
 		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
 

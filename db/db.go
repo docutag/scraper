@@ -76,7 +76,7 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 
 	// Insert or replace scraped data
 	query := `
-		INSERT INTO scraped_data (id, url, data, slug, created_at, updated_at)
+		INSERT INTO scraper_scraped_data (id, url, data, slug, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT(url) DO UPDATE SET
 			id = excluded.id,
@@ -100,7 +100,7 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 	}
 
 	// Delete old images for this scrape_id (if re-scraping)
-	_, err = tx.Exec("DELETE FROM images WHERE scrape_id = $1", data.ID)
+	_, err = tx.Exec("DELETE FROM scraper_images WHERE scrape_id = $1", data.ID)
 	if err != nil {
 		return fmt.Errorf("failed to delete old images: %w", err)
 	}
@@ -127,7 +127,7 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 		}
 
 		imageQuery := `
-			INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
+			INSERT INTO scraper_images (id, scrape_id, url, alt_text, summary, tags, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		`
 
@@ -167,7 +167,7 @@ func (db *DB) SaveScrapedData(data *models.ScrapedData) error {
 // GetByID retrieves scraped data by ID
 func (db *DB) GetByID(id string) (*models.ScrapedData, error) {
 	var jsonData string
-	query := "SELECT data FROM scraped_data WHERE id = $1"
+	query := "SELECT data FROM scraper_scraped_data WHERE id = $1"
 
 	err := db.conn.QueryRow(query, id).Scan(&jsonData)
 	if err == sql.ErrNoRows {
@@ -188,7 +188,7 @@ func (db *DB) GetByID(id string) (*models.ScrapedData, error) {
 // GetByURL retrieves scraped data by URL
 func (db *DB) GetByURL(url string) (*models.ScrapedData, error) {
 	var jsonData string
-	query := "SELECT data FROM scraped_data WHERE url = $1"
+	query := "SELECT data FROM scraper_scraped_data WHERE url = $1"
 
 	err := db.conn.QueryRow(query, url).Scan(&jsonData)
 	if err == sql.ErrNoRows {
@@ -208,7 +208,7 @@ func (db *DB) GetByURL(url string) (*models.ScrapedData, error) {
 
 // DeleteByID deletes scraped data by ID
 func (db *DB) DeleteByID(id string) error {
-	result, err := db.conn.Exec("DELETE FROM scraped_data WHERE id = $1", id)
+	result, err := db.conn.Exec("DELETE FROM scraper_scraped_data WHERE id = $1", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete data: %w", err)
 	}
@@ -228,7 +228,7 @@ func (db *DB) DeleteByID(id string) error {
 // List returns all scraped data with optional pagination
 func (db *DB) List(limit, offset int) ([]*models.ScrapedData, error) {
 	query := `
-		SELECT data FROM scraped_data
+		SELECT data FROM scraper_scraped_data
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2
 	`
@@ -264,7 +264,7 @@ func (db *DB) List(limit, offset int) ([]*models.ScrapedData, error) {
 // Count returns the total count of scraped data entries
 func (db *DB) Count() (int, error) {
 	var count int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM scraped_data").Scan(&count)
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM scraper_scraped_data").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count data: %w", err)
 	}
@@ -274,7 +274,7 @@ func (db *DB) Count() (int, error) {
 // URLExists checks if a URL already exists in the database
 func (db *DB) URLExists(url string) (bool, error) {
 	var exists bool
-	query := "SELECT EXISTS(SELECT 1 FROM scraped_data WHERE url = $1)"
+	query := "SELECT EXISTS(SELECT 1 FROM scraper_scraped_data WHERE url = $1)"
 	err := db.conn.QueryRow(query, url).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("failed to check URL existence: %w", err)
@@ -299,7 +299,7 @@ func (db *DB) SaveImage(image *models.ImageInfo, scrapeID string) error {
 	}
 
 	query := `
-		INSERT INTO images (id, scrape_id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, relevance_score, created_at, updated_at)
+		INSERT INTO scraper_images (id, scrape_id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, width, height, file_size_bytes, content_type, exif_data, relevance_score, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 	`
 
@@ -354,7 +354,7 @@ func (db *DB) GetImageByID(id string) (*models.ImageInfo, error) {
 		relevanceScore    sql.NullFloat64
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data, relevance_score FROM images WHERE id = $1"
+	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data, relevance_score FROM scraper_images WHERE id = $1"
 	err := db.conn.QueryRow(query, id).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &extractedText, &base64Data, &filePath, &slugVal, &scrapeID, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON, &relevanceScore)
 
 	if err == sql.ErrNoRows {
@@ -439,7 +439,7 @@ func (db *DB) GetImageByURL(url string) (*models.ImageInfo, error) {
 		relevanceScore sql.NullFloat64
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, scrape_id, width, height, file_size_bytes, content_type, exif_data, relevance_score FROM images WHERE url = $1 LIMIT 1"
+	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, scrape_id, width, height, file_size_bytes, content_type, exif_data, relevance_score FROM scraper_images WHERE url = $1 LIMIT 1"
 	err := db.conn.QueryRow(query, url).Scan(&imageID, &imageURL, &altText, &summary, &tagsJSON, &extractedText, &base64Data, &filePath, &slugVal, &scrapeID, &width, &height, &fileSizeBytes, &contentType, &exifJSON, &relevanceScore)
 
 	if err == sql.ErrNoRows {
@@ -519,7 +519,7 @@ func (db *DB) GetImageBySlug(slug string) (*models.ImageInfo, error) {
 		relevanceScore    sql.NullFloat64
 	)
 
-	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data, relevance_score FROM images WHERE slug = $1 LIMIT 1"
+	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, file_path, slug, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data, relevance_score FROM scraper_images WHERE slug = $1 LIMIT 1"
 	err := db.conn.QueryRow(query, slug).Scan(&imageID, &url, &altText, &summary, &tagsJSON, &extractedText, &base64Data, &filePath, &slugVal, &scrapeID, &tombstoneDatetime, &width, &height, &fileSizeBytes, &contentType, &exifJSON, &relevanceScore)
 
 	if err == sql.ErrNoRows {
@@ -591,7 +591,7 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 	}
 
 	// Query all images
-	query := "SELECT id, url, alt_text, summary, tags, base64_data, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images ORDER BY created_at DESC"
+	query := "SELECT id, url, alt_text, summary, tags, base64_data, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM scraper_images ORDER BY created_at DESC"
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query images: %w", err)
@@ -687,7 +687,7 @@ func (db *DB) SearchImagesByTags(searchTags []string) ([]*models.ImageInfo, erro
 
 // GetImagesByScrapeID retrieves all images associated with a scrape ID
 func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) {
-	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM images WHERE scrape_id = $1 ORDER BY created_at"
+	query := "SELECT id, url, alt_text, summary, tags, extracted_text, base64_data, scrape_id, tombstone_datetime, width, height, file_size_bytes, content_type, exif_data FROM scraper_images WHERE scrape_id = $1 ORDER BY created_at"
 	rows, err := db.conn.Query(query, scrapeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query images: %w", err)
@@ -771,7 +771,7 @@ func (db *DB) GetImagesByScrapeID(scrapeID string) ([]*models.ImageInfo, error) 
 
 // DeleteImageByID deletes an image by its ID
 func (db *DB) DeleteImageByID(id string) error {
-	result, err := db.conn.Exec("DELETE FROM images WHERE id = $1", id)
+	result, err := db.conn.Exec("DELETE FROM scraper_images WHERE id = $1", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete image: %w", err)
 	}
@@ -794,7 +794,7 @@ func (db *DB) TombstoneImageByID(id string) error {
 	tombstoneTime := time.Now().UTC().Add(90 * 24 * time.Hour)
 
 	result, err := db.conn.Exec(
-		"UPDATE images SET tombstone_datetime = $1 WHERE id = $2",
+		"UPDATE scraper_images SET tombstone_datetime = $1 WHERE id = $2",
 		tombstoneTime,
 		id,
 	)
@@ -817,7 +817,7 @@ func (db *DB) TombstoneImageByID(id string) error {
 // UntombstoneImageByID removes the tombstone_datetime for an image
 func (db *DB) UntombstoneImageByID(id string) error {
 	result, err := db.conn.Exec(
-		"UPDATE images SET tombstone_datetime = NULL WHERE id = $1",
+		"UPDATE scraper_images SET tombstone_datetime = NULL WHERE id = $1",
 		id,
 	)
 	if err != nil {
@@ -845,7 +845,7 @@ func (db *DB) UpdateImageTags(id string, tags []string) error {
 	}
 
 	// Update tags in database
-	result, err := db.conn.Exec("UPDATE images SET tags = $1 WHERE id = $2", string(tagsJSON), id)
+	result, err := db.conn.Exec("UPDATE scraper_images SET tags = $1 WHERE id = $2", string(tagsJSON), id)
 	if err != nil {
 		return fmt.Errorf("failed to update image tags: %w", err)
 	}
@@ -875,14 +875,14 @@ func (db *DB) GetImageStats() (*ImageStats, error) {
 	stats := &ImageStats{}
 
 	// Count all images (including tombstoned - they still exist until purged)
-	countQuery := "SELECT COUNT(*) FROM images"
+	countQuery := "SELECT COUNT(*) FROM scraper_images"
 	err := db.conn.QueryRow(countQuery).Scan(&stats.TotalStored)
 	if err != nil {
 		return nil, fmt.Errorf("failed to count images: %w", err)
 	}
 
 	// Sum total storage size (including tombstoned - they still consume disk space)
-	sizeQuery := "SELECT COALESCE(SUM(file_size_bytes), 0) FROM images"
+	sizeQuery := "SELECT COALESCE(SUM(file_size_bytes), 0) FROM scraper_images"
 	err = db.conn.QueryRow(sizeQuery).Scan(&stats.TotalStorageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sum storage size: %w", err)
