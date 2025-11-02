@@ -55,4 +55,5 @@ VOLUME /app/storage
 EXPOSE 8080
 
 # Default to running the API server
-CMD ["./scraper-api", "-addr", ":8080", "-db", "/app/data/scraper.db"]
+# All configuration through environment variables - no command-line flags needed
+CMD ["./scraper-api"]
