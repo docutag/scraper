@@ -35,7 +35,7 @@ import (
 type Server struct {
 	db              *db.DB
 	scraper         *scraper.Scraper
-	storage         *storage.Storage
+	storage         storage.StorageInterface
 	addr            string
 	server          *http.Server
 	mux             *http.ServeMux
@@ -47,6 +47,7 @@ type Server struct {
 type Config struct {
 	Addr          string
 	DBConfig      db.Config
+	S3Config      storage.S3Config
 	ScraperConfig scraper.Config
 	CORSEnabled   bool
 }
@@ -59,13 +60,11 @@ func NewServer(config Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	// Initialize filesystem storage
-	storageConfig := storage.Config{
-		BasePath: config.ScraperConfig.StoragePath,
-	}
-	storageInstance, err := storage.New(storageConfig)
+	// Initialize S3 storage
+	ctx := context.Background()
+	storageInstance, err := storage.NewStorage(ctx, config.S3Config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize storage: %w", err)
+		return nil, fmt.Errorf("failed to initialize S3 storage: %w", err)
 	}
 
 	// Initialize scraper with database and storage
