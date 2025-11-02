@@ -48,13 +48,13 @@ func Migrate(db *sql.DB) error {
 	return nil
 }
 
-// ensureMigrationsTable creates the schema_migrations table if it doesn't exist
+// ensureMigrationsTable creates the scraper_schema_version table if it doesn't exist
 func ensureMigrationsTable(db *sql.DB) error {
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
+		CREATE TABLE IF NOT EXISTS scraper_schema_version (
 			version INTEGER PRIMARY KEY,
 			name TEXT NOT NULL,
-			applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			applied_at TIMESTAMPTZ DEFAULT NOW()
 		);
 	`)
 	return err
@@ -63,7 +63,7 @@ func ensureMigrationsTable(db *sql.DB) error {
 // getCurrentVersion returns the current migration version
 func getCurrentVersion(db *sql.DB) (int, error) {
 	var version int
-	err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version)
+	err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM scraper_schema_version").Scan(&version)
 	if err != nil {
 		return 0, err
 	}
@@ -85,7 +85,7 @@ func runMigration(db *sql.DB, m Migration) error {
 
 	// Record migration
 	if _, err := tx.Exec(
-		"INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
+		"INSERT INTO scraper_schema_version (version, name) VALUES ($1, $2)",
 		m.Version, m.Name,
 	); err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
@@ -130,7 +130,7 @@ func Rollback(db *sql.DB) error {
 	}
 
 	// Remove migration record
-	if _, err := tx.Exec("DELETE FROM schema_migrations WHERE version = $1", currentVersion); err != nil {
+	if _, err := tx.Exec("DELETE FROM scraper_schema_version WHERE version = $1", currentVersion); err != nil {
 		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
 
