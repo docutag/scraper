@@ -78,11 +78,11 @@ type Scraper struct {
 	ollamaClient    *ollama.Client
 	ollamaSemaphore chan struct{} // Semaphore to limit concurrent Ollama requests
 	db              DB            // Database for checking existing images
-	storage         Storage       // Filesystem storage for images and content
+	storage         StorageBackend // Storage backend for images and content
 }
 
-// Storage interface defines the storage operations needed by the scraper
-type Storage interface {
+// StorageBackend interface defines the storage operations needed by the scraper
+type StorageBackend interface {
 	SaveImage(imageData []byte, slug, contentType string) (string, error)
 	SaveContent(content, slug string) (string, error)
 	ReadImage(relPath string) ([]byte, error)
@@ -93,8 +93,8 @@ type Storage interface {
 
 // New creates a new Scraper instance
 // db parameter can be nil if image deduplication is not needed
-// storage parameter can be nil if filesystem storage is not needed
-func New(config Config, db DB, storage Storage) *Scraper {
+// storage parameter can be nil if storage is not needed
+func New(config Config, db DB, storage StorageBackend) *Scraper {
 	// Limit concurrent Ollama requests to 3 to prevent overload during batch operations
 	maxConcurrentOllamaRequests := 3
 

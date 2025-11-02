@@ -17,6 +17,7 @@ import (
 	"github.com/docutag/scraper"
 	"github.com/docutag/scraper/api"
 	"github.com/docutag/scraper/db"
+	"github.com/docutag/scraper/storage"
 )
 
 // getEnv retrieves an environment variable or returns a default value
@@ -51,12 +52,19 @@ func main() {
 
 	// Default values
 	defaultPort := getEnv("PORT", "8080")
-	defaultStoragePath := getEnv("STORAGE_BASE_PATH", "./storage")
 	defaultOllamaURL := getEnv("OLLAMA_URL", "http://localhost:11434")
 	defaultOllamaModel := getEnv("OLLAMA_MODEL", "gpt-oss:20b")
 	defaultOllamaVisionModel := getEnv("OLLAMA_VISION_MODEL", defaultOllamaModel) // Default to same as text model if not specified
 	defaultLinkScoreThreshold := getEnv("LINK_SCORE_THRESHOLD", "0.5")
 	defaultMaxImages := getEnv("MAX_IMAGES", "20")
+
+	// S3 storage configuration (required - MinIO for dev/staging, DO Spaces for production)
+	s3Endpoint := getEnv("S3_ENDPOINT", "")          // e.g., "http://minio:9000" for MinIO
+	s3Region := getEnv("S3_REGION", "us-east-1")     // e.g., "sfo3" for DO Spaces
+	s3Bucket := getEnv("S3_BUCKET", "scraper-data")
+	s3AccessKeyID := getEnv("S3_ACCESS_KEY_ID", "")
+	s3SecretAccessKey := getEnv("S3_SECRET_ACCESS_KEY", "")
+	s3UsePathStyle := getEnv("S3_USE_PATH_STYLE", "false") == "true" // true for MinIO
 
 	// Parse link score threshold
 	linkScoreThreshold, err := strconv.ParseFloat(defaultLinkScoreThreshold, 64)
@@ -111,10 +119,28 @@ func main() {
 	}
 	logger.Info("using PostgreSQL database", "host", dbHost, "port", dbPort, "database", dbName)
 
+	// Configure S3 storage (only backend supported)
+	s3Config := storage.S3Config{
+		Endpoint:        s3Endpoint,
+		Region:          s3Region,
+		Bucket:          s3Bucket,
+		AccessKeyID:     s3AccessKeyID,
+		SecretAccessKey: s3SecretAccessKey,
+		UsePathStyle:    s3UsePathStyle,
+	}
+
+	logger.Info("using S3 storage backend",
+		"endpoint", s3Endpoint,
+		"region", s3Region,
+		"bucket", s3Bucket,
+		"path_style", s3UsePathStyle,
+	)
+
 	// Create server configuration
 	config := api.Config{
 		Addr:     ":" + *port,
 		DBConfig: dbConfig,
+		S3Config: s3Config,
 		ScraperConfig: scraper.Config{
 			HTTPTimeout:         30 * time.Second,
 			OllamaBaseURL:       *ollamaURL,
@@ -124,8 +150,8 @@ func main() {
 			MaxImageSizeBytes:   10 * 1024 * 1024, // 10MB
 			ImageTimeout:        15 * time.Second,
 			LinkScoreThreshold:  *scoreThreshold,
-			StoragePath:         defaultStoragePath,
-			MaxImages:           maxImages, // Maximum images to download per scrape
+			StoragePath:         "./storage", // Legacy field, not used with S3
+			MaxImages:           maxImages,   // Maximum images to download per scrape
 		},
 		CORSEnabled: !*disableCORS,
 	}
@@ -164,7 +190,8 @@ func main() {
 			"port", *port,
 			"database_host", dbHost,
 			"database_name", dbName,
-			"storage_path", defaultStoragePath,
+			"s3_bucket", s3Bucket,
+			"s3_region", s3Region,
 			"ollama_url", *ollamaURL,
 			"ollama_model", *ollamaModel,
 			"ollama_vision_model", *ollamaVisionModel,
